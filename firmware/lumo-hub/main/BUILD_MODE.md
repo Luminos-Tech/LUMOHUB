@@ -19,7 +19,7 @@ set(MODE "full" CACHE STRING "Build mode: full | button_test")
 Rồi chạy:
 
 ```bash
-cd Lumo/Lumo-LuminosTech
+cd firmware/lumo-hub
 idf.py fullclean    # xóa cache cũ
 idf.py build flash monitor
 ```

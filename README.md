@@ -44,7 +44,7 @@ Next.js frontend :3000
 
 Backend entry point: `backend/app/main.py` (`app.main:app`). The application creates database tables and starts APScheduler in its lifespan.
 
-Firmware entry point: `Lumo/Lumo-LuminosTech/main/Lumo-LuminosTech.c` with modules under `main/{wifi,http_api,mic,record,audio,oled,button}`.
+Firmware entry point: `firmware/lumo-hub/main/Lumo-LuminosTech.c` with modules under `main/{wifi,http_api,mic,record,audio,ble,device_control,button}`. Band wearable firmware is under `firmware/lumo-band/`.
 
 ## Repository Layout
 
@@ -57,17 +57,20 @@ backend/                         FastAPI application
   app/tasks/scheduler.py        Reminder and session jobs
   app/websocket/                 Device and TTS WebSockets
   alembic/                       Database migrations
+  tests/                         Backend unit tests
 frontend-web/                    Next.js application
   src/app/                       App Router pages and proxy routes
   src/features/                  API modules
   src/store/                     Zustand stores
   src/components/                UI components
-Lumo/Lumo-LuminosTech/           ESP-IDF firmware
-docs/                            Technical notes and library documentation
-docker-compose.yml               Production-like local stack
-docker-compose.dev.yml           Hot-reload development stack
+firmware/
+  lumo-hub/                      ESP32-S3 Hub ESP-IDF firmware
+  lumo-band/                     ESP32-C3 BLE wearable ESP-IDF firmware
+docs/                            Guides, hardware-flow diagrams & PDF, engineering notes
+scripts/                         Diagnostic, audio test, QR, and serial utility scripts
+docker-compose.yml               Local development stack (PostgreSQL, FastAPI, Next.js)
 AGENTS.md                        Agent and architecture guidance
-MCP_LUMOHUB_SETUP.md             Project MCP setup
+LICENSE                          Apache License 2.0
 ```
 
 ## Backend API
@@ -162,12 +165,6 @@ docker compose up --build
 
 Open `http://localhost:3000`, backend docs at `http://localhost:8000/docs`, and health at `http://localhost:8000/health`.
 
-For hot reload:
-
-```bash
-docker compose -f docker-compose.dev.yml up --build
-```
-
 ## Running Without Docker
 
 Backend (PowerShell):
@@ -214,8 +211,8 @@ Firmware requires an installed ESP-IDF toolchain and the correct board configura
 
 ## MCP and Agent Setup
 
-See [MCP_LUMOHUB_SETUP.md](MCP_LUMOHUB_SETUP.md) for the project-local MCP configuration and progressive memory files. See [AGENTS.md](AGENTS.md) for source-verified architecture, roadmap boundaries, and coding-agent rules.
+See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for the project-local MCP configuration and progressive memory files. See [AGENTS.md](AGENTS.md) for source-verified architecture, roadmap boundaries, and coding-agent rules.
 
 ## License
 
-Copyright 2026 Luminos Tech. All rights reserved unless a separate license is provided.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.

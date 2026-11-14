@@ -19,7 +19,7 @@ services:
 
   backend:
     build:
-      context: ./backend-vietfuture
+      context: ./backend
       dockerfile: Dockerfile
     container_name: lumohub_backend
     restart: unless-stopped
@@ -37,16 +37,16 @@ services:
     # Inject LLM API keys from backend/.env (Gemini/Groq/Tavily/Perplexity)
     # so the dev container can hit /api/v1/lumo/audio/ end-to-end.
     env_file:
-      - ./backend-vietfuture/.env
+      - ./backend/.env
     ports:
       - "8000:8000"
     volumes:
-      - ./backend-vietfuture:/app
+      - ./backend:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend-web:
     build:
-      context: ./frontend-web-vietfuture
+      context: ./frontend-web
       dockerfile: Dockerfile.dev
     container_name: lumohub_frontend
     restart: unless-stopped
@@ -60,7 +60,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./frontend-web-vietfuture:/app
+      - ./frontend-web:/app
       - /app/node_modules
       - /app/.next
     command: npm run dev -- --hostname 0.0.0.0 --port 3000

@@ -41,7 +41,7 @@
 - Âm thanh lấy từ các file có sẵn trong SPIFFS. Đây là điều khiển loa Hub, không phát trên loa điện thoại và chưa phải TTS tùy ý từ web.
 - Cập nhật cả backend, frontend và firmware trước khi dùng. Máy chủ phải có `GET /api/v1/devices/{id}/control` và `POST /api/v1/devices/{id}/commands`.
 - Địa chỉ WebSocket có thể đổi qua `idf.py menuconfig` → **LUMO device control**. Khi thử bằng địa chỉ LAN, máy tính và ESP32 phải liên lạc được với nhau.
-- Xem giao thức và cách kiểm tra trong `backend-vietfuture/DEVICE_CONTROL.md`.
+- Xem giao thức và cách kiểm tra trong `backend/DEVICE_CONTROL.md`.
 
 Bản `v0.5.10-registration-reconnect` gửi handshake trước heartbeat và chỉ xác nhận
 online khi backend trả `ready` cho đúng mã Hub. Client tự kết nối lại cả khi server

@@ -22,10 +22,10 @@ The backend Docker image and Compose configuration set `TZ=Asia/Ho_Chi_Minh`
 for process time and logs. Rebuild and restart the backend to apply:
 
 ```powershell
-docker compose -f docker-compose-vietfuture.yml up -d --build backend
+docker compose up -d --build backend
 ```
 
-Run regression checks from `backend-vietfuture`:
+Run regression checks from `backend`:
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v

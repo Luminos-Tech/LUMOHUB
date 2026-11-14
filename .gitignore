@@ -1,28 +1,47 @@
 # OS
 .DS_Store
 Thumbs.db
+.AppleDouble
+.LSOverride
 
 # Env / secrets
 .env
 .env.local
 .env.*.local
+!.env.example
+!.env.local.example
 *.pem
 
 # Logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.pnpm-debug.log*
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
 .venv/
 venv/
 env/
+ENV/
 *.egg-info/
+.eggs/
+develop-eggs/
+sdist/
+wheels/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
 
 # Node / Next.js
 node_modules/
@@ -32,212 +51,64 @@ dist/
 build/
 .turbo/
 .parcel-cache/
-
-# Build artifacts
-*.o
-*.a
-*.bin
-*.elf
-*.map
-build-*/
-.pio/
-.esp-idf/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+*.tsbuildinfo
 
 # Database
 *.db
 *.sqlite
 *.sqlite3
+dump.sql.bak
+*.sql.backup
 
-# Coverage
-coverage/
-.nyc_output/
+# IDE / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
 
-# Misc
+# Caches & Project MCP runtime state
 .cache/
 .sass-cache/
 .mcp-memory/
 
-# Zephyr / ESP-IDF submodules & vendors (avoid recursive repos)
-zephyr-source/
-zephyr/
-modules/
-managed_components/
-bootloader/
-.west/
-# Local junction
-frontend-web
-frontend-web/
-
-# Environment variables
-.env
-.env.local
-.env.*.local
-!.env.example
-!.env.local.example
-test_audio.py
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-# Python - lib/ was commented out above to avoid blocking frontend/src/lib/
-__pycache__/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.hypothesis/
-
-# Backend specific
-backend/.venv
-backend/.venv/
-backend/.env
-backend/.env.local
-backend/db.sqlite3
-backend/logs/
-backend/*.log
-
-# Node.js / Frontend
-frontend-web/node_modules/
-frontend-web/.next/
-frontend-web/out/
-frontend-web/build/
-frontend-web/dist/
-frontend-web/.env.local
-frontend-web/.env.*.local
-frontend-web/npm-debug.log*
-frontend-web/yarn-debug.log*
-frontend-web/yarn-error.log*
-frontend-web/.pnpm-debug.log*
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-.iml
-
-# IDE specific
-*.sublime-workspace
-*.sublime-project
-.atom/
-.LSP*/
-
-# OS
-Thumbs.db
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Database
-*.sqlite
-*.sqlite3
-*.db
-dump.sql.bak
-*.sql.backup
-
-# Logs
-logs/
-*.log
-npm-debug.log*
-
-# Optional
-.cache/
-
-# Project-local MCP memory and runtime state
-.mcp-memory/*.jsonl
-.mcp-memory/*.sqlite
-
-# IoT / ESP32 / Arduino
-*.bin
-*.elf
-*.hex
-*.map
-build/
-.pio/
-.pioenvs/
-.piolibdeps/
-.vscode/c_cpp_properties.json
-.vscode/launch.json
-.vscode/ipch/
-.vscode/.browse.c_cpp.db*
-.vscode/settings.json
-*.code-workspace
-.clang_complete
-.gcc-flags.json
+# Firmware (ESP-IDF / PlatformIO)
 *.o
 *.a
 *.d
 *.su
 *.lst
-
-# PlatformIO specific
-.pio
-.pioenvs
-.piolibdeps
+*.bin
+*.elf
+*.hex
+*.map
+build-*/
+.pio/
+.pioenvs/
+.piolibdeps/
+.esp-idf/
 .clang_complete
 .gcc-flags.json
-
-# Arduino IDE
-*.ino.cpp
-*.ino.with_bootloader.bin
-*.ino.with_bootloader.hex
-
-# ESP-IDF
 sdkconfig
 sdkconfig.old
-build/
 dependencies.lock
+managed_components/
+bootloader/
 
-# Zephyr / west workspace generated files
-Lumo/.venv/
-Lumo/.west/
-Lumo/zephyr-source/
-Lumo/zephyr/
-Lumo/modules/
-Lumo/bootloader/
-Lumo/tools/
-Lumo/Lumo-Band/build*/
-Lumo/Lumo-LuminosTech/sdkconfig.ble-central
-
-# Test files
+# Local test & generated debug artifacts
 .playwright-cli/
-frontend-web-vietfuture/output/playwright/
+frontend-web/output/playwright/
 test_*.py
-!backend-vietfuture/tests/test_*.py
+!backend/tests/test_*.py
+test_audio.py
 test_*.wav
+local_record.wav
+response.wav
+test.wav
+record_from_board.wav
 *_output.wav
 *.pcm
-
-!frontend-web/src/lib/
-!frontend-web/src/lib/**
+lumo_device_*.png

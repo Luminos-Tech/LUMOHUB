@@ -13,7 +13,7 @@ from reportlab.pdfgen import canvas
 from pypdf import PdfReader
 
 ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "output" / "pdf"
+OUT = Path(__file__).resolve().parent / "pdf"
 OUT.mkdir(parents=True, exist_ok=True)
 PDF = OUT / "LUMO_TECHNICAL_FLOW_A4.pdf"
 PAGE_W, PAGE_H = A4
@@ -165,19 +165,19 @@ assert "band_state_update" in extracted and "GPIO42" in extracted
 assert "FALL_CONFIRMED" in extracted
 
 sources = [
-    "lumo-vietfuture/Lumo-Band/src/main.c",
-    "lumo-vietfuture/Lumo-Band/src/mpu6050.c",
-    "lumo-vietfuture/Lumo-LuminosTech/main/CMakeLists.txt",
-    "lumo-vietfuture/Lumo-LuminosTech/main/Lumo-LuminosTech.c",
-    "lumo-vietfuture/Lumo-LuminosTech/main/lumo_runtime.c",
-    "lumo-vietfuture/Lumo-LuminosTech/main/ble/lumo_band_central.c",
-    "lumo-vietfuture/Lumo-LuminosTech/main/ble/lumo_band_state.c",
-    "lumo-vietfuture/Lumo-LuminosTech/main/ble/lumo_band_state.h",
-    "lumo-vietfuture/Lumo-LuminosTech/main/device_control/device_control.c",
-    "lumo-vietfuture/Lumo-LuminosTech/main/http_api/http_api.c",
-    "backend-vietfuture/app/routes/push.py",
-    "backend-vietfuture/app/routes/event_buttons.py",
-    "backend-vietfuture/app/websocket/routes.py",
+    "firmware/lumo-band/src/main.c",
+    "firmware/lumo-band/src/mpu6050.c",
+    "firmware/lumo-hub/main/CMakeLists.txt",
+    "firmware/lumo-hub/main/Lumo-LuminosTech.c",
+    "firmware/lumo-hub/main/lumo_runtime.c",
+    "firmware/lumo-hub/main/ble/lumo_band_central.c",
+    "firmware/lumo-hub/main/ble/lumo_band_state.c",
+    "firmware/lumo-hub/main/ble/lumo_band_state.h",
+    "firmware/lumo-hub/main/device_control/device_control.c",
+    "firmware/lumo-hub/main/http_api/http_api.c",
+    "backend/app/routes/push.py",
+    "backend/app/routes/event_buttons.py",
+    "backend/app/websocket/routes.py",
 ]
 manifest = {
     "date": "2026-10-29",

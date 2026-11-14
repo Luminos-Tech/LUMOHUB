@@ -12,7 +12,7 @@ The native Codex filesystem, shell, and Git capabilities remain preferred for lo
 
 ## On-demand servers
 
-`mcp.full.example.json` contains optional servers for GitHub, PostgreSQL/DBHub, Playwright, sequential thinking, Sentry, Grafana, memory-kg, and Docker Gateway. Copy only the server needed for the current task into `.mcp.json`; do not expose every schema by default.
+`docs/mcp.full.example.json` contains optional servers for GitHub, PostgreSQL/DBHub, Playwright, sequential thinking, Sentry, Grafana, memory-kg, and Docker Gateway. Copy only the server needed for the current task into `.mcp.json`; do not expose every schema by default.
 
 Required environment variables:
 

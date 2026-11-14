@@ -20,7 +20,10 @@ The repository consists of:
 
 - `backend/`: FastAPI, SQLAlchemy/PostgreSQL, JWT authentication, CRUD, scheduler, AI, and WebSocket services.
 - `frontend-web/`: Next.js 14 App Router with React/TypeScript, dashboard, administration, and API proxy.
-- `Lumo/Lumo-LuminosTech/`: ESP-IDF/C firmware for ESP32 (Wi-Fi captive portal, microphone/recording, I2S audio, button input, and HTTP API). **OLED display module đã được gỡ bỏ** (phiên bản v0.5.1-test-no-oled trở đi) — phần cứng hiện tại chỉ gồm: button (GPIO42), mạch giải mã loa (I2S GPIO 4/5/6), và microphone (I2S GPIO 15/16/17).
+- `firmware/lumo-hub/`: ESP-IDF/C firmware for ESP32-S3 Hub (Wi-Fi captive portal, BLE central, device control, microphone/recording, I2S audio, button input, and HTTP/WebSocket API). **OLED display module đã được gỡ bỏ** (phiên bản v0.5.1-test-no-oled trở đi) — phần cứng hiện tại chỉ gồm: button (GPIO42), mạch giải mã loa (I2S GPIO 4/5/6), và microphone (I2S GPIO 15/16/17).
+- `firmware/lumo-band/`: ESP-IDF/C firmware for ESP32-C3 SuperMini BLE wearable with MPU6050 IMU.
+- `docs/`: Project documentation, demo guide, hardware-flow diagrams/PDF, MCP setup, and engineering notes.
+- `scripts/`: Utility and diagnostic scripts (`diag_prod.py`, `record_and_send.py`, `generate_device_qr.py`, `detect_chip.bat`).
 
 Additional technical documentation is in `docs/`. The Vietnamese project proposal is stored externally as `LumoHub_LuminosTech_Mo Ta.pdf`. Use it for product intent, market positioning, pricing assumptions, and roadmap context. Treat the actual source code as authoritative for implemented behavior.
 
@@ -106,9 +109,9 @@ Frontend stack: Next.js 14, React 18, TypeScript, Tailwind, FullCalendar, Axios,
 
 ## ESP32 Firmware
 
-`Lumo/Lumo-LuminosTech` is an ESP-IDF project. Main code is in `main/Lumo-LuminosTech.c`, with modules under `main/{wifi,http_api,mic,record,audio,button}`. **OLED module đã được gỡ bỏ** — không còn `main/oled/` và không có field `display` trong `lumo_feature_config_t`. The firmware handles Wi-Fi/provisioning, SNTP, recording, I2S playback, button input (GPIO42), and HTTP/WebSocket communication with the backend. `managed_components/` contains cJSON; avoid editing generated or dependency code unless necessary.
+`firmware/lumo-hub` is an ESP-IDF project for the ESP32-S3 Hub, and `firmware/lumo-band` is an ESP-IDF project for the ESP32-C3 wearable. Main Hub code is in `firmware/lumo-hub/main/Lumo-LuminosTech.c`, with modules under `main/{wifi,http_api,mic,record,audio,ble,device_control,button}`. **OLED module đã được gỡ bỏ** — không còn `main/oled/` và không có field `display` trong `lumo_feature_config_t`. The firmware handles Wi-Fi/provisioning, SNTP, BLE central, recording, I2S playback, button input (GPIO42), and HTTP/WebSocket communication with the backend.
 
-Audio documentation and search notes are in `docs/` and the `*_library_docs.md` files in the firmware tree.
+Audio and architecture documentation are in `docs/` and `firmware/lumo-hub/doc/`.
 
 ## Business Model and Positioning
 
@@ -150,10 +153,9 @@ During the prototype stage, communications should focus on learning, community p
 
 ## Running Locally
 
-Docker Compose defines three services: `postgres`, `backend`, and `frontend-web`.
+Docker Compose (`docker-compose.yml`) defines three services: `postgres`, `backend`, and `frontend-web`.
 
-- Production-like: `docker compose up --build` (ports 5432, 8000, and 3000).
-- Development with hot reload: `docker compose -f docker-compose.dev.yml up --build`.
+- Local dev stack: `docker compose up --build` (ports 5432, 8000, and 3000).
 
 The backend needs `DATABASE_URL`, `SECRET_KEY`, `ALGORITHM`, token expiry settings, `CORS_ORIGINS`, and optional AI/VAPID keys (see `backend/.env.example`). The frontend proxy needs `INTERNAL_API_URL`; WebSockets use `NEXT_PUBLIC_WS_URL` (see `frontend-web/.env.local.example`).
 
@@ -166,4 +168,4 @@ The backend needs `DATABASE_URL`, `SECRET_KEY`, `ALGORITHM`, token expiry settin
 
 ## Root Files
 
-`README.md`, `audio_fix_notes.md`, `test_audio.py`, `response.wav`, `test.wav`, the two Compose files, and VS Code configuration are present. Do not assume `dump.sql` or `test_ws.py` exists unless `rg --files` finds it.
+`README.md`, `AGENTS.md`, `LICENSE`, `.gitignore`, `.mcp.json`, and `docker-compose.yml` are at the repository root. Helper scripts live under `scripts/`, and documentation/notes live under `docs/`. Do not assume `dump.sql` or `test_ws.py` exists unless `rg --files` finds it.
