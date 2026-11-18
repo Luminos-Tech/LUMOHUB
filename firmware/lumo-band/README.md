@@ -1,6 +1,6 @@
-# Lumo-Band ESP32-C3 BLE Wearable (`v0.4.0-mpu-burst-ai`)
+# Lumo-Band ESP32-C3 BLE Wearable (`v0.4.1-mpu-ble-stream`)
 
-ESP-IDF 5.5.5 firmware for the ESP32-C3 SuperMini wearable + `MPU6050` 6-axis IMU. The band advertises as `LUMO-TEST-C3`, maintains an on-board fall state machine, streams raw IMU diagnostics over BLE to `lumo-hub` (`ESP32-S3`), and runs a self-test / edge copy of the 3-model TinyML false-alert filter.
+ESP-IDF 5.5.5 firmware for the ESP32-C3 SuperMini wearable + `MPU6050` 6-axis IMU. The band acts as a pure BLE sensor node (no on-device TinyML weights): it advertises as `LUMO-TEST-C3`, maintains the baseline fall state machine, and streams raw IMU packets over BLE so `lumo-hub` (`ESP32-S3`) performs all TinyML classification.
 
 ## Wiring (`MPU6050` via I2C)
 
@@ -23,9 +23,5 @@ idf.py -p COMx flash monitor
 - Service: `12345678-1234-5678-1234-56789abcdef0`
 - Characteristic: `12345678-1234-5678-1234-56789abcdef1`
 - Properties: READ and NOTIFY
-- Packet **`0x02` (12 bytes @ 1 Hz / immediate on fall)**: `version=0x02`, `state`, `edge_ai_class`, `edge_ai_conf_pct`, `hr`, `steps`, `battery`
+- Packet **`0x02` (12 bytes @ 1 Hz / immediate on fall)**: `version=0x02`, `state`, `reserved0=0xFF`, `reserved1=0`, `hr`, `steps`, `battery`
 - Packet **`0x03` (20 bytes @ 0.5 Hz idle, boosted to `10 Hz` for 5s on `|a| >= 2.5g`)**: `version=0x03`, `state`, `sequence`, `sensor_age_ms`, raw `ax/ay/az`, raw `gx/gy/gz`, `magnitude_x100`
-
-## On-Device AI Self-Test (`RF-25 + Physics-MLP + 1D-CNN`)
-
-On boot, [`lumo_ai_run_self_test()`](src/lumo_imu_ai.c) verifies all 5 scenarios (`NORMAL_ADL`, `WRIST_SHOCK_FALSE_ALERT`, `DEVICE_DROP_OFF_WRIST`, `SOFT_FALL_RECOVERING`, `CRITICAL_FALL_IMMOBILE`), suppressing `IMPACT_WAIT` / `FALL_CONFIRMED` when the fused ensemble classifies wrist shock, device drop-off, or normal ADL.

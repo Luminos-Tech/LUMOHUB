@@ -25,9 +25,6 @@ typedef struct {
     int16_t gyro_raw[3];
     uint32_t sample_sequence;
     int64_t sampled_at_ms;
-    uint8_t ai_class;
-    uint8_t ai_confidence_pct;
-    bool ai_ready;
 } mpu6050_snapshot_t;
 
 esp_err_t mpu6050_start(void);

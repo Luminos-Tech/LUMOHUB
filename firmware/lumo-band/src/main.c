@@ -31,7 +31,7 @@
 #define MPU_DIAGNOSTIC_BURST_DURATION_MS 5000
 #define MPU_DIAGNOSTIC_BURST_PEAK_G 2.5f
 #define MPU_DIAGNOSTIC_VERSION 0x03U
-#define BAND_FW_VERSION "v0.4.0-mpu-burst-ai"
+#define BAND_FW_VERSION "v0.4.1-mpu-ble-stream"
 
 static const char *TAG = "lumo_c3_band";
 
@@ -337,8 +337,8 @@ static void sample_task(void *param)
             payload.heart_rate = hr;
             payload.steps = steps;
             payload.battery = battery;
-            payload.reserved0 = snapshot.ai_ready ? snapshot.ai_class : 0xFFU;
-            payload.reserved1 = snapshot.ai_ready ? snapshot.ai_confidence_pct : 0U;
+            payload.reserved0 = 0xFFU;
+            payload.reserved1 = 0U;
 
             portENTER_CRITICAL(&state_lock);
             memcpy(sample_value, &payload, sizeof(payload));

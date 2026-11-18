@@ -216,7 +216,6 @@ def main() -> None:
     header = format_c_header(flat, m_sk)
     targets = [
         repo_root / "LUMOHUB" / "firmware" / "lumo-hub" / "main" / "ble" / "lumo_hub_rf_model.h",
-        repo_root / "LUMOHUB" / "firmware" / "lumo-band" / "include" / "lumo_hub_rf_model.h",
         repo_root / "03_ThietKe_KyThuat" / "lumohub_sim_prototype" / "src" / "lumo_hub_rf_model.h",
         root / "models" / "approach2_event_mlp" / "lumo_hub_rf_model.h",
         root / "c_export" / "lumo_hub_rf_model.h",

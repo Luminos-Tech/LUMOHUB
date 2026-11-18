@@ -13,8 +13,8 @@ Implemented in this repository:
 - AI text/audio endpoints and LUMO WebSockets for text, STT, LLM, and TTS flows.
 - Next.js dashboard for calendar, events, notifications, devices, settings, and administration.
 - ESP-IDF firmware for both prototypes:
-  - `firmware/lumo-hub/`: ESP32-S3 Hub (`v0.6.0-dsoft-stream-tts`) with Wi-Fi, I2S mic/audio streaming, physical button check-in, NimBLE Central (`0x02` telemetry + `0x03` 10 Hz IMU stream), and an on-device 3-model IMU TinyML ensemble (`Compact RF-25 + LumoEventMLP + LumoBurst1DCNN`) to suppress wrist false alerts.
-  - `firmware/lumo-band/`: ESP32-C3 + MPU6050 BLE wearable (`v0.4.0-mpu-burst-ai`) featuring a fall state machine (`IDLE -> IMPACT_WAIT -> FALL_CONFIRMED`), high-rate `10 Hz` raw IMU burst streaming (`0x03`) upon impact (`|a| >= 2.5g` or `|a| < 0.55g`), and an edge self-test copy of the 3-model TinyML engine.
+  - `firmware/lumo-hub/`: ESP32-S3 Hub (`v0.6.0-dsoft-stream-tts`) with Wi-Fi, I2S mic/audio streaming, physical button check-in, NimBLE Central (`0x02` telemetry + `0x03` 10 Hz IMU stream), and the on-device 3-model IMU TinyML ensemble (`Compact RF-25 + LumoEventMLP + LumoBurst1DCNN`) to suppress wrist false alerts.
+  - `firmware/lumo-band/`: ESP32-C3 + MPU6050 pure BLE wearable sensor node (`v0.4.1-mpu-ble-stream`) with no on-device ML weights — reads the IMU at `10 Hz`, tracks the baseline fall state machine (`IDLE -> IMPACT_WAIT -> FALL_CONFIRMED`), and streams `0x02` telemetry plus high-rate `10 Hz` raw IMU burst packets (`0x03`) upon impact (`|a| >= 2.5g` or `|a| < 0.65g`) to `lumo-hub`.
 - `ml_pipeline/`: Dataset builder (combining real SisFall, Kaggle ADL, and 3D biomechanics), training, stress-testing, Hugging Face publishing, and zero-dependency C99 weight export (`Compact RF-25`, `LumoEventMLP`, `LumoBurst1DCNN`).
 
 Roadmap or proposal-level capabilities include the production 4G Hub, nRF52840 + MPU6050 BLE fall-detection wearable, activity trend analytics, abnormal-silence escalation, self-hosted private LLM infrastructure, clinical validation, and insurance integration.
@@ -79,7 +79,7 @@ LICENSE                          Apache License 2.0
 
 ## On-Device IMU TinyML Fall & False-Alert Engine
 
-Both the `lumo-hub` (ESP32-S3 production inference host) and `lumo-band` (ESP32-C3 diagnostic/edge prototype) run a zero-dependency C99 ensemble ([`lumo_imu_ai.c`](firmware/lumo-hub/main/ble/lumo_imu_ai.c)) trained on a 30,000-window 5-class dataset (`3.0s` windows = `30 samples x 6 IMU channels` @ `10 Hz`) to eliminate everyday false alerts (clapping, table slap, martial-arts hand strikes, or taking off and dropping the band) while preserving fall sensitivity:
+`lumo-hub` (`ESP32-S3`) runs the zero-dependency C99 inference ensemble ([`lumo_imu_ai.c`](firmware/lumo-hub/main/ble/lumo_imu_ai.c)) centrally while `lumo-band` remains a lightweight pure BLE IMU sensor transmitter (matching the target low-power `nRF` wearable architecture). The Hub evaluates `3.0s` windows (`30 samples x 6 IMU channels` @ `10 Hz`) trained on a 30,000-window 5-class dataset to eliminate everyday false alerts (clapping, table slap, martial-arts hand strikes, or taking off and dropping the band) while preserving fall sensitivity:
 
 1. **`0: NORMAL_ADL`** — Walking, sitting, everyday motion
 2. **`1: WRIST_SHOCK_FALSE_ALERT`** — High-G wrist shock without body collapse or prolonged immobility
@@ -89,15 +89,15 @@ Both the `lumo-hub` (ESP32-S3 production inference host) and `lumo-band` (ESP32-
 
 ### Ensemble Architecture & Measured Benchmarks (`0.20 * CNN + 0.40 * MLP + 0.40 * RF`)
 
-| Model | Input & Footprint | Held-out Test (`N=4,500`) | Wrist / Drop FAR | ESP32-S3 Latency (`COM10`) | ESP32-C3 Latency (`COM11`) |
-| --- | --- | :---: | :---: | :---: | :---: |
-| **Compact RF-25** (`lumo_hub_rf_model.h`) | 16 physics features, ~62.7 KB (`25` trees) | **99.87%** | **0.00% / 0.00%** | **0.43 – 1.03 ms** | **0.56 – 1.18 ms** |
-| **LumoEventMLP** (`lumo_hub_feature_model.h`) | 16 physics features, `13.5 KB` (`3,232` MACs) | **99.73%** | **0.00% / 0.00%** | **0.82 – 0.97 ms** | **4.59 – 4.80 ms** |
-| **LumoBurst1DCNN** (`lumo_hub_cnn_model.h`) | Raw `[30 x 6]` window, `21.3 KB` (`58,368` MACs) | **98.38%** | 0.11% / 0.00% | **13.6 – 13.8 ms** | **82.4 – 84.3 ms** |
+| Model | Input & Footprint | Held-out Test (`N=4,500`) | Wrist / Drop FAR | ESP32-S3 Hub Latency (`COM10`) |
+| --- | --- | :---: | :---: | :---: |
+| **Compact RF-25** (`lumo_hub_rf_model.h`) | 16 physics features, ~62.7 KB (`25` trees) | **99.87%** | **0.00% / 0.00%** | **0.43 – 1.03 ms** |
+| **LumoEventMLP** (`lumo_hub_feature_model.h`) | 16 physics features, `13.5 KB` (`3,232` MACs) | **99.73%** | **0.00% / 0.00%** | **0.82 – 0.97 ms** |
+| **LumoBurst1DCNN** (`lumo_hub_cnn_model.h`) | Raw `[30 x 6]` window, `21.3 KB` (`58,368` MACs) | **98.38%** | 0.11% / 0.00% | **13.6 – 13.8 ms** |
 
 ### BLE Dual-Packet Architecture (`lumo-band` -> `lumo-hub`)
 
-- **`0x02` (12 bytes @ 1 Hz):** Compact telemetry packet (`version`, `state`, `hr`, `steps`, `battery`, plus optional Band edge AI class/confidence tags).
+- **`0x02` (12 bytes @ 1 Hz):** Compact telemetry packet (`version`, `state`, `hr`, `steps`, `battery`; `reserved0=0xFF`, `reserved1=0` on pure BLE Band firmware).
 - **`0x03` (20 bytes @ 0.5 Hz idle -> 10 Hz burst for 5s on `|a| >= 2.5g`):** Raw calibrated 6-axis `MPU6050` payload streamed over BLE to the ESP32-S3 Hub, which buffers `1.8s` post-impact (`18` samples + `12` pre-impact samples = `3.0s`) and runs the 3-model ensemble.
 - **Hugging Face Models & Dataset:**
   - Approach 1 (`1D-CNN`): https://huggingface.co/fragilov/lumohub-imu-burst-1dcnn
