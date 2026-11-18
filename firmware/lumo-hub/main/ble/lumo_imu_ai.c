@@ -10,9 +10,15 @@
  */
 
 #include "lumo_imu_ai.h"
+#if LUMO_AI_USE_CNN
 #include "lumo_hub_cnn_model.h"
+#endif
+#if LUMO_AI_USE_MLP
 #include "lumo_hub_feature_model.h"
+#endif
+#if LUMO_AI_USE_RF
 #include "lumo_hub_rf_model.h"
+#endif
 
 #include <math.h>
 #include <stdio.h>
@@ -46,6 +52,19 @@ static const char *s_class_names[LUMO_AI_NUM_CLASSES] = {
     "SOFT_FALL_RECOVERING",
     "CRITICAL_FALL_IMMOBILE",
 };
+
+const char *lumo_ai_active_model_name(void)
+{
+#if LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_MLP
+    return "LumoEventMLP";
+#elif LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_RF25
+    return "Compact-RF25";
+#elif LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_CNN
+    return "LumoBurst1DCNN";
+#else
+    return "RF-25 + Physics-MLP + 1D-CNN";
+#endif
+}
 
 const char *lumo_ai_class_name(lumo_ai_class_t cls)
 {
@@ -110,6 +129,7 @@ uint8_t lumo_ai_buffer_count(void)
     return s_ring_count;
 }
 
+#if LUMO_AI_USE_CNN || LUMO_AI_USE_MLP
 static void softmax_5(const float logits[LUMO_AI_NUM_CLASSES], float probs[LUMO_AI_NUM_CLASSES])
 {
     float max_v = logits[0];
@@ -130,6 +150,7 @@ static void softmax_5(const float logits[LUMO_AI_NUM_CLASSES], float probs[LUMO_
         }
     }
 }
+#endif
 
 static lumo_ai_class_t argmax_5(const float probs[LUMO_AI_NUM_CLASSES], uint8_t *conf_pct)
 {
@@ -306,6 +327,7 @@ void lumo_ai_extract_features(const float window[LUMO_AI_WINDOW_LEN][LUMO_AI_CHA
 void lumo_ai_predict_cnn(const float window[LUMO_AI_WINDOW_LEN][LUMO_AI_CHANNELS],
                          lumo_ai_pred_t *out)
 {
+#if LUMO_AI_USE_CNN
     uint64_t t0 = lumo_ai_now_us();
 
     static float x_norm[6][30];
@@ -394,11 +416,16 @@ void lumo_ai_predict_cnn(const float window[LUMO_AI_WINDOW_LEN][LUMO_AI_CHANNELS
     softmax_5(logits, out->probs);
     out->pred_class = argmax_5(out->probs, &out->confidence_pct);
     out->latency_us = (uint32_t)(t1 >= t0 ? (t1 - t0) : 0ULL);
+#else
+    (void)window;
+    memset(out, 0, sizeof(*out));
+#endif
 }
 
 void lumo_ai_predict_feature_mlp(const float features[LUMO_AI_NUM_FEATURES],
                                  lumo_ai_pred_t *out)
 {
+#if LUMO_AI_USE_MLP
     uint64_t t0 = lumo_ai_now_us();
 
     float x_in[LUMO_MLP_IN_FEATURES];
@@ -437,11 +464,16 @@ void lumo_ai_predict_feature_mlp(const float features[LUMO_AI_NUM_FEATURES],
     softmax_5(logits, out->probs);
     out->pred_class = argmax_5(out->probs, &out->confidence_pct);
     out->latency_us = (uint32_t)(t1 >= t0 ? (t1 - t0) : 0ULL);
+#else
+    (void)features;
+    memset(out, 0, sizeof(*out));
+#endif
 }
 
 void lumo_ai_predict_feature_rf(const float features[LUMO_AI_NUM_FEATURES],
                                 lumo_ai_pred_t *out)
 {
+#if LUMO_AI_USE_RF
     uint64_t t0 = lumo_ai_now_us();
 
     float acc[LUMO_AI_NUM_CLASSES] = {0.0f};
@@ -469,6 +501,51 @@ void lumo_ai_predict_feature_rf(const float features[LUMO_AI_NUM_FEATURES],
     uint64_t t1 = lumo_ai_now_us();
     out->pred_class = argmax_5(out->probs, &out->confidence_pct);
     out->latency_us = (uint32_t)(t1 >= t0 ? (t1 - t0) : 0ULL);
+#else
+    (void)features;
+    memset(out, 0, sizeof(*out));
+#endif
+}
+
+static void format_active_tag(const lumo_ai_dual_result_t *res, char *tag, size_t tag_len)
+{
+#if LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_MLP
+    snprintf(tag, tag_len, "MLP:%u%%", res->mlp.confidence_pct);
+#elif LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_RF25
+    snprintf(tag, tag_len, "RF:%u%%", res->rf.confidence_pct);
+#elif LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_CNN
+    snprintf(tag, tag_len, "CNN:%u%%", res->cnn.confidence_pct);
+#else
+    snprintf(tag, tag_len, "RF:%u%% MLP:%u%% CNN:%u%%",
+             res->rf.confidence_pct, res->mlp.confidence_pct, res->cnn.confidence_pct);
+#endif
+}
+
+void lumo_ai_format_metrics(const lumo_ai_dual_result_t *res, char *buf, size_t buf_len)
+{
+    if (res == NULL || buf == NULL || buf_len == 0) {
+        return;
+    }
+#if LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_MLP
+    snprintf(buf, buf_len, "MLP=%s(%u%%,%luus) | FINAL=%s(%u%%)",
+             lumo_ai_class_name(res->mlp.pred_class), res->mlp.confidence_pct, (unsigned long)res->mlp.latency_us,
+             lumo_ai_class_name(res->final_class), res->final_confidence_pct);
+#elif LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_RF25
+    snprintf(buf, buf_len, "RF=%s(%u%%,%luus) | FINAL=%s(%u%%)",
+             lumo_ai_class_name(res->rf.pred_class), res->rf.confidence_pct, (unsigned long)res->rf.latency_us,
+             lumo_ai_class_name(res->final_class), res->final_confidence_pct);
+#elif LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_CNN
+    snprintf(buf, buf_len, "CNN=%s(%u%%,%luus) | FINAL=%s(%u%%)",
+             lumo_ai_class_name(res->cnn.pred_class), res->cnn.confidence_pct, (unsigned long)res->cnn.latency_us,
+             lumo_ai_class_name(res->final_class), res->final_confidence_pct);
+#else
+    snprintf(buf, buf_len,
+             "RF=%s(%u%%,%luus) | MLP=%s(%u%%,%luus) | CNN=%s(%u%%,%luus) | FUSED=%s(%u%%)",
+             lumo_ai_class_name(res->rf.pred_class), res->rf.confidence_pct, (unsigned long)res->rf.latency_us,
+             lumo_ai_class_name(res->mlp.pred_class), res->mlp.confidence_pct, (unsigned long)res->mlp.latency_us,
+             lumo_ai_class_name(res->cnn.pred_class), res->cnn.confidence_pct, (unsigned long)res->cnn.latency_us,
+             lumo_ai_class_name(res->final_class), res->final_confidence_pct);
+#endif
 }
 
 void lumo_ai_evaluate_window(const float window[LUMO_AI_WINDOW_LEN][LUMO_AI_CHANNELS],
@@ -480,16 +557,27 @@ void lumo_ai_evaluate_window(const float window[LUMO_AI_WINDOW_LEN][LUMO_AI_CHAN
     lumo_ai_predict_feature_mlp(out->features, &out->mlp);
     lumo_ai_predict_feature_rf(out->features, &out->rf);
 
+#if LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_MLP
+    memcpy(out->ensemble_probs, out->mlp.probs, sizeof(out->ensemble_probs));
+    out->models_agree = true;
+#elif LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_RF25
+    memcpy(out->ensemble_probs, out->rf.probs, sizeof(out->ensemble_probs));
+    out->models_agree = true;
+#elif LUMO_AI_ACTIVE_MODEL == LUMO_AI_MODEL_CNN
+    memcpy(out->ensemble_probs, out->cnn.probs, sizeof(out->ensemble_probs));
+    out->models_agree = true;
+#else
     for (int c = 0; c < LUMO_AI_NUM_CLASSES; c++) {
         out->ensemble_probs[c] =
             0.20f * out->cnn.probs[c] +
             0.40f * out->mlp.probs[c] +
             0.40f * out->rf.probs[c];
     }
-    out->final_class = argmax_5(out->ensemble_probs, &out->final_confidence_pct);
     out->models_agree =
         (out->cnn.pred_class == out->mlp.pred_class) &&
         (out->mlp.pred_class == out->rf.pred_class);
+#endif
+    out->final_class = argmax_5(out->ensemble_probs, &out->final_confidence_pct);
     out->peak_g = out->features[1];
     out->tilt_deg = out->features[6] * 180.0f;
     out->pulse_width_ratio = out->features[3];
@@ -502,36 +590,34 @@ void lumo_ai_evaluate_window(const float window[LUMO_AI_WINDOW_LEN][LUMO_AI_CHAN
         (out->final_class == LUMO_AI_CLASS_SOFT_FALL_RECOVER ||
          out->final_class == LUMO_AI_CLASS_CRITICAL_FALL);
 
+    char model_tag[48];
+    format_active_tag(out, model_tag, sizeof(model_tag));
+
     switch (out->final_class) {
     case LUMO_AI_CLASS_NORMAL_ADL:
         snprintf(out->commentary, sizeof(out->commentary),
-                 "[AI] Binh thuong: %.2fg goc %.0f deg (RF:%u%% MLP:%u%% CNN:%u%%)",
-                 (double)out->peak_g, (double)out->tilt_deg,
-                 out->rf.confidence_pct, out->mlp.confidence_pct, out->cnn.confidence_pct);
+                 "[AI] Binh thuong: %.2fg goc %.0f deg (%s)",
+                 (double)out->peak_g, (double)out->tilt_deg, model_tag);
         break;
     case LUMO_AI_CLASS_WRIST_SHOCK_FALSE:
         snprintf(out->commentary, sizeof(out->commentary),
-                 "[AI] Chan bao gia: Chan dong co tay %.2fg goc %.0f deg -> Go ban/vo tay (RF:%u%% MLP:%u%%)",
-                 (double)out->peak_g, (double)out->tilt_deg,
-                 out->rf.confidence_pct, out->mlp.confidence_pct);
+                 "[AI] Chan bao gia: Chan dong co tay %.2fg goc %.0f deg -> Go ban/vo tay (%s)",
+                 (double)out->peak_g, (double)out->tilt_deg, model_tag);
         break;
     case LUMO_AI_CLASS_DEVICE_DROPPED:
         snprintf(out->commentary, sizeof(out->commentary),
-                 "[AI] Chan bao gia: Vong tay roi/thao ra %.2fg, 0 rung dong sinh hoc (RF:%u%% MLP:%u%%)",
-                 (double)out->peak_g,
-                 out->rf.confidence_pct, out->mlp.confidence_pct);
+                 "[AI] Chan bao gia: Vong tay roi/thao ra %.2fg, 0 rung dong sinh hoc (%s)",
+                 (double)out->peak_g, model_tag);
         break;
     case LUMO_AI_CLASS_SOFT_FALL_RECOVER:
         snprintf(out->commentary, sizeof(out->commentary),
-                 "[AI] Canh bao vang: Truot nga %.2fg (nghieng %.0f deg) dang hoi phuc -> Hoi tham (RF:%u%% MLP:%u%%)",
-                 (double)out->peak_g, (double)out->tilt_deg,
-                 out->rf.confidence_pct, out->mlp.confidence_pct);
+                 "[AI] Canh bao vang: Truot nga %.2fg (nghieng %.0f deg) dang hoi phuc -> Hoi tham (%s)",
+                 (double)out->peak_g, (double)out->tilt_deg, model_tag);
         break;
     case LUMO_AI_CLASS_CRITICAL_FALL:
         snprintf(out->commentary, sizeof(out->commentary),
-                 "[AI] KHAN CAP (%u%%): Te nga nang %.2fg, do %.0f deg & bat dong (RF:%u%% MLP:%u%%)",
-                 out->final_confidence_pct, (double)out->peak_g, (double)out->tilt_deg,
-                 out->rf.confidence_pct, out->mlp.confidence_pct);
+                 "[AI] KHAN CAP (%u%%): Te nga nang %.2fg, do %.0f deg & bat dong (%s)",
+                 out->final_confidence_pct, (double)out->peak_g, (double)out->tilt_deg, model_tag);
         break;
     default:
         snprintf(out->commentary, sizeof(out->commentary), "[AI] Unknown class");
@@ -565,8 +651,9 @@ void lumo_ai_run_self_test(void)
     };
     static float win[LUMO_AI_WINDOW_LEN][LUMO_AI_CHANNELS];
     static lumo_ai_dual_result_t res;
+    char ai_metrics[160];
 
-    printf("\n=== LUMOHUB ON-DEVICE AI BENCHMARK (RF-25 vs Physics-MLP vs 1D-CNN) ===\n");
+    printf("\n=== LUMOHUB ON-DEVICE AI BENCHMARK (%s) ===\n", lumo_ai_active_model_name());
     for (int sc = 0; sc < 5; sc++) {
         if (sc == 0) {
             fill_standing_baseline(win, 0.18f, 18.0f);
@@ -633,17 +720,8 @@ void lumo_ai_run_self_test(void)
         }
 
         lumo_ai_evaluate_window(win, &res);
-        printf(
-            "  [%s]\n"
-            "     RF=%-23s(%u%%,%luus) | MLP=%-23s(%u%%,%luus) | CNN=%-23s(%u%%,%luus)\n"
-            "     FUSED=%-23s(%u%%) | %s\n",
-            labels[sc],
-            lumo_ai_class_name(res.rf.pred_class), res.rf.confidence_pct, (unsigned long)res.rf.latency_us,
-            lumo_ai_class_name(res.mlp.pred_class), res.mlp.confidence_pct, (unsigned long)res.mlp.latency_us,
-            lumo_ai_class_name(res.cnn.pred_class), res.cnn.confidence_pct, (unsigned long)res.cnn.latency_us,
-            lumo_ai_class_name(res.final_class), res.final_confidence_pct,
-            res.commentary
-        );
+        lumo_ai_format_metrics(&res, ai_metrics, sizeof(ai_metrics));
+        printf("  [%s]\n     %s\n     %s\n", labels[sc], ai_metrics, res.commentary);
     }
     printf("=======================================================================\n\n");
 }

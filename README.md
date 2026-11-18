@@ -13,7 +13,7 @@ Implemented in this repository:
 - AI text/audio endpoints and LUMO WebSockets for text, STT, LLM, and TTS flows.
 - Next.js dashboard for calendar, events, notifications, devices, settings, and administration.
 - ESP-IDF firmware for both prototypes:
-  - `firmware/lumo-hub/`: ESP32-S3 Hub (`v0.6.0-dsoft-stream-tts`) with Wi-Fi, I2S mic/audio streaming, physical button check-in, NimBLE Central (`0x02` telemetry + `0x03` 10 Hz IMU stream), and the on-device 3-model IMU TinyML ensemble (`Compact RF-25 + LumoEventMLP + LumoBurst1DCNN`) to suppress wrist false alerts.
+  - `firmware/lumo-hub/`: ESP32-S3 Hub (`v0.6.0-dsoft-stream-tts`) with Wi-Fi, I2S mic/audio streaming, physical button check-in, NimBLE Central (`0x02` telemetry + `0x03` 10 Hz IMU stream), and compile-time selectable on-device IMU TinyML (defaults to `LumoEventMLP` only for minimal Flash/RAM; switchable in 1 line to `Compact RF-25`, `LumoBurst1DCNN`, or 3-model ensemble).
   - `firmware/lumo-band/`: ESP32-C3 + MPU6050 pure BLE wearable sensor node (`v0.4.1-mpu-ble-stream`) with no on-device ML weights — reads the IMU at `10 Hz`, tracks the baseline fall state machine (`IDLE -> IMPACT_WAIT -> FALL_CONFIRMED`), and streams `0x02` telemetry plus high-rate `10 Hz` raw IMU burst packets (`0x03`) upon impact (`|a| >= 2.5g` or `|a| < 0.65g`) to `lumo-hub`.
 - `ml_pipeline/`: Dataset builder (combining real SisFall, Kaggle ADL, and 3D biomechanics), training, stress-testing, Hugging Face publishing, and zero-dependency C99 weight export (`Compact RF-25`, `LumoEventMLP`, `LumoBurst1DCNN`).
 
@@ -79,7 +79,12 @@ LICENSE                          Apache License 2.0
 
 ## On-Device IMU TinyML Fall & False-Alert Engine
 
-`lumo-hub` (`ESP32-S3`) runs the zero-dependency C99 inference ensemble ([`lumo_imu_ai.c`](firmware/lumo-hub/main/ble/lumo_imu_ai.c)) centrally while `lumo-band` remains a lightweight pure BLE IMU sensor transmitter (matching the target low-power `nRF` wearable architecture). The Hub evaluates `3.0s` windows (`30 samples x 6 IMU channels` @ `10 Hz`) trained on a 30,000-window 5-class dataset to eliminate everyday false alerts (clapping, table slap, martial-arts hand strikes, or taking off and dropping the band) while preserving fall sensitivity:
+`lumo-hub` (`ESP32-S3`) runs TinyML inference centrally ([`lumo_imu_ai.c`](firmware/lumo-hub/main/ble/lumo_imu_ai.c)) while `lumo-band` remains a lightweight pure BLE IMU sensor transmitter (matching the target low-power `nRF` wearable architecture). To save Flash/RAM, **only the selected model's weights are compiled into firmware**:
+
+* **Active default (`LUMO_AI_ACTIVE_MODEL = LUMO_AI_MODEL_MLP`):** **`LumoEventMLP`** (`19,983 B` text / `2,556 B` bss in `lumo_imu_ai.o`, **99.73%** accuracy, **0.00%** Wrist/Drop FAR, **0.82–0.97 ms** inference on ESP32-S3).
+* **1-line model switching** in [`lumo_imu_ai.h`](firmware/lumo-hub/main/ble/lumo_imu_ai.h): set `#define LUMO_AI_ACTIVE_MODEL` to `LUMO_AI_MODEL_MLP` (`1`), `LUMO_AI_MODEL_RF25` (`2`), `LUMO_AI_MODEL_CNN` (`3`), or `LUMO_AI_MODEL_ENSEMBLE` (`4`).
+
+The Hub evaluates `3.0s` windows (`30 samples x 6 IMU channels` @ `10 Hz`) trained on a 30,000-window 5-class dataset to eliminate everyday false alerts (clapping, table slap, martial-arts hand strikes, or taking off and dropping the band) while preserving fall sensitivity:
 
 1. **`0: NORMAL_ADL`** — Walking, sitting, everyday motion
 2. **`1: WRIST_SHOCK_FALSE_ALERT`** — High-G wrist shock without body collapse or prolonged immobility

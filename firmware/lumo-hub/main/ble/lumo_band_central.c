@@ -434,12 +434,10 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                         lumo_ai_dual_result_t ai_res;
                         s_pending_impact_eval = false;
                         if (lumo_ai_evaluate_ring(&ai_res)) {
+                            char ai_metrics[160];
                             band_state_update_ai(&ai_res);
-                            ESP_LOGW(TAG, "[LUMO_AI] RF=%s(%u%%,%luus) | MLP=%s(%u%%,%luus) | CNN=%s(%u%%,%luus) | FUSED=%s(%u%%)",
-                                     lumo_ai_class_name(ai_res.rf.pred_class), ai_res.rf.confidence_pct, (unsigned long)ai_res.rf.latency_us,
-                                     lumo_ai_class_name(ai_res.mlp.pred_class), ai_res.mlp.confidence_pct, (unsigned long)ai_res.mlp.latency_us,
-                                     lumo_ai_class_name(ai_res.cnn.pred_class), ai_res.cnn.confidence_pct, (unsigned long)ai_res.cnn.latency_us,
-                                     lumo_ai_class_name(ai_res.final_class), ai_res.final_confidence_pct);
+                            lumo_ai_format_metrics(&ai_res, ai_metrics, sizeof(ai_metrics));
+                            ESP_LOGW(TAG, "[LUMO_AI] %s", ai_metrics);
                             device_control_log(
                                 ai_res.should_trigger_voice_check ? 'E' : 'I',
                                 "LUMO_AI",
