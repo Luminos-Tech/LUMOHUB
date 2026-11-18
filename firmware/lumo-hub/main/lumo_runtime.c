@@ -110,13 +110,61 @@ static void band_alert_audio(band_alert_type_t alert, band_severity_t severity)
 
     /* --- Beep-loop alerts: keep playing while condition holds --- */
     switch (alert) {
-    case BAND_ALERT_FALL_CONFIRMED:
-        /* Tắt — chỉ giữ HIGH_ACTIVITY beep 5s */
+    case BAND_ALERT_FALL_CONFIRMED: {
+        ESP_LOGE(TAG, "AI-verified CRITICAL FALL alert ON (peak=%.2fg)",
+                 (double)g_band_state.peak_x100 / 100.0);
+        for (int i = 0; i < 2; i++) {
+            (void)audio_play("/spiffs/risk.wav");
+        }
+        char *push_title = strdup("KHAN CAP: Phat hien te nga!");
+        char *push_body = malloc(220);
+        if (push_title && push_body) {
+            if (g_band_state.ai_ready && g_band_state.ai_commentary[0] != '\0') {
+                snprintf(push_body, 220, "%s", (const char *)g_band_state.ai_commentary);
+            } else {
+                snprintf(push_body, 220, "Te nga nghiem trong %.2fg - hay kiem tra ngay!",
+                         (double)g_band_state.peak_x100 / 100.0);
+            }
+            char **args = malloc(sizeof(char *) * 2);
+            if (args) {
+                args[0] = push_title;
+                args[1] = push_body;
+                xTaskCreate((TaskFunction_t)push_alert_task, "PushAlert", 12288, args, 3, NULL);
+            } else {
+                free(push_title);
+                free(push_body);
+            }
+        } else {
+            free(push_title);
+            free(push_body);
+        }
         return;
+    }
 
-    case BAND_ALERT_FALL_SUSPECT:
-        /* Tắt — chỉ giữ HIGH_ACTIVITY beep 5s */
+    case BAND_ALERT_FALL_SUSPECT: {
+        if (g_band_state.ai_ready && !g_band_state.ai_suppressed) {
+            ESP_LOGW(TAG, "AI-verified SOFT FALL -> playing voice check-in");
+            (void)audio_play("/spiffs/checkLife.wav");
+            char *push_title = strdup("Canh bao vang: Truot nga nhe");
+            char *push_body = malloc(220);
+            if (push_title && push_body) {
+                snprintf(push_body, 220, "%s", (const char *)g_band_state.ai_commentary);
+                char **args = malloc(sizeof(char *) * 2);
+                if (args) {
+                    args[0] = push_title;
+                    args[1] = push_body;
+                    xTaskCreate((TaskFunction_t)push_alert_task, "PushAlert", 12288, args, 3, NULL);
+                } else {
+                    free(push_title);
+                    free(push_body);
+                }
+            } else {
+                free(push_title);
+                free(push_body);
+            }
+        }
         return;
+    }
 
     case BAND_ALERT_HIGH_ACTIVITY:
         /* HIGH_ACTIVITY: peak >= 8g → phát risk.wav 2 lần + gửi push notification 3 lần */
@@ -898,7 +946,7 @@ static void upload_audio_task(void *arg)
     esp_err_t err = http_api_upload_audio_get_audio(
         args->server_url,
         args->file_path,
-        RESPONSE_WAV_PATH);
+        NULL);
 
     if (err != ESP_OK)
     {
@@ -907,19 +955,9 @@ static void upload_audio_task(void *arg)
         goto done;
     }
 
-    display_message("LUMO speaking");
-    err = audio_play(RESPONSE_WAV_PATH);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Response playback failed: %s", esp_err_to_name(err));
-        display_message("Play error");
-        goto done;
-    }
-
-    ESP_LOGI(TAG, "Voice response playback completed");
+    ESP_LOGI(TAG, "Voice response RAM stream playback completed");
     display_message("Done");
-    vTaskDelay(pdMS_TO_TICKS(800));
-    remove(RESPONSE_WAV_PATH);
+    vTaskDelay(pdMS_TO_TICKS(300));
 
 done:
     display_message("Hold to speak");

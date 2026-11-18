@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_timer.h"           /* esp_timer_get_time() used by static inlines */
+#include "lumo_imu_ai.h"
 
 /* ========================================================================
  * Alert types — ordered by severity
@@ -167,6 +168,18 @@ typedef struct {
     uint64_t           stillness_start_ms;    /* When magnitude stayed below 1.05g */
     bool               real_fall;             /* True = real fall → keep beeping */
     bool               soft_fall;             /* True = soft fall → silenced     */
+
+    /* --- Dual TinyML Hub AI fields (1D-CNN + Physics MLP) --- */
+    bool               ai_ready;              /* True once AI evaluated recent impact */
+    bool               ai_pending;            /* True while buffering 1.8s for AI    */
+    bool               ai_suppressed;         /* True = AI filtered false alert      */
+    uint8_t            ai_class;              /* lumo_ai_class_t fused prediction    */
+    uint8_t            ai_cnn_class;          /* Approach 1 1D-CNN class             */
+    uint8_t            ai_mlp_class;          /* Approach 2 Physics-MLP class        */
+    uint8_t            ai_confidence_pct;     /* Ensemble confidence 0..100%         */
+    uint64_t           ai_pending_ms;         /* Timestamp when impact burst started */
+    uint64_t           ai_evaluated_ms;       /* Timestamp of last AI evaluation     */
+    char               ai_commentary[188];    /* Vietnamese AI diagnostic summary    */
 } lumo_band_shared_t;
 
 /* ========================================================================
@@ -228,6 +241,11 @@ void band_state_update(uint8_t  state,
                        uint8_t  battery,
                        uint16_t magnitude_x100,
                        uint16_t peak_x100);
+
+/**
+ * @brief Update shared band state with Dual TinyML (CNN + MLP) Hub evaluation.
+ */
+void band_state_update_ai(const lumo_ai_dual_result_t *res);
 
 /**
  * @brief Called by main task to evaluate alert thresholds.

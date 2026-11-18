@@ -1,0 +1,33 @@
+{
+  "architecture": "LumoEventMLP",
+  "input_features": 16,
+  "feature_names": [
+    "f0_pre_min_mag_g",
+    "f1_impact_peak_g",
+    "f2_impact_mean_g",
+    "f3_impact_width_ratio",
+    "f4_impact_peak_gyro_norm",
+    "f5_impact_gyro_rms",
+    "f6_tilt_angle_norm",
+    "f7_gravity_vertical_drop",
+    "f8_post_mean_mag_g",
+    "f9_post_std_mag_g",
+    "f10_post_mean_gyro_norm",
+    "f11_post_std_gyro_norm",
+    "f12_post_micro_tremor_score",
+    "f13_peak_jerk_g",
+    "f14_recovery_energy_ratio",
+    "f15_post_stillness_ratio"
+  ],
+  "num_classes": 5,
+  "class_names": [
+    "NORMAL_ADL",
+    "WRIST_SHOCK_FALSE_ALERT",
+    "DEVICE_DROP_OFF_WRIST",
+    "SOFT_FALL_RECOVERING",
+    "CRITICAL_FALL_IMMOBILE"
+  ],
+  "folded_parameters": 3365,
+  "flash_bytes": 13460,
+  "macs_per_inference": 3232
+}

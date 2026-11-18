@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request  # type: ignore
-from fastapi.responses import Response  # type: ignore
+from fastapi.responses import FileResponse, Response  # type: ignore
 from sqlalchemy.orm import Session  # type: ignore
 from sqlalchemy.sql import func
 from app.db.session import get_db
@@ -13,10 +13,14 @@ from app.schemas.device import (
     DeviceResponse,
     DeviceLogsResponse,
     DeviceLogTarget,
+    DeviceTTSAckRequest,
+    DeviceTTSAckResponse,
+    DeviceTTSJob,
 )
 from app.crud.device import (
     get_device_by_id,
     get_device_by_code,
+    normalize_device_code,
     upsert_device,
     update_device,
     delete_device_by_id,
@@ -25,6 +29,7 @@ from app.crud.device import (
 )
 from app.crud.log import log_action
 from app.services.deps import get_current_active_user
+from app.services.tts_service import SAMPLE_RATE_HZ, tts_queue
 from app.models.user import User
 from app.core.config import settings
 from app.websocket.manager import manager
@@ -62,7 +67,7 @@ def device_control_status(
     return manager.control_status(device.device_id)
 
 
-@router.post("/{device_id}/commands", response_model=DeviceCommandResponse)
+@router.post("/{device_id}/commands", response_model=DeviceCommandResponse, response_model_exclude_none=True)
 async def send_device_command(
     device_id: int,
     body: DeviceCommandRequest,
@@ -79,6 +84,60 @@ async def send_device_command(
     # Copy ORM values before awaiting the device response.
     code = device.device_id
     owner_id = current_user.id
+
+    if body.action == "speak":
+        if not state.get("tts_stream"):
+            raise HTTPException(status_code=409, detail="Firmware does not support TTS streaming")
+        assert body.text is not None
+        job = await asyncio.to_thread(
+            tts_queue.enqueue,
+            code,
+            body.text,
+            volume=body.volume,
+            priority=body.priority,
+            voice=body.voice,
+            claim_immediately=True,
+        )
+        log_action(
+            db, action="device_command", user_id=owner_id, target_type="device",
+            target_id=device_id, ip_address=request.client.host if request.client else None,
+            details=f"action=speak, bytes={job['audio_bytes']}",
+        )
+        extra = {
+            "job_id": job["id"],
+            "lease": job["lease"],
+            "volume": job["volume"],
+            "audio_bytes": job["audio_bytes"],
+            "sample_rate": SAMPLE_RATE_HZ,
+            "audio_path": f"/api/v1/devices/code/{code}/audio/{job['id']}?lease={job['lease']}",
+        }
+        try:
+            result = await manager.execute_command(code, "speak", extra=extra, timeout=65.0)
+        except asyncio.TimeoutError:
+            try:
+                tts_queue.ack(code, job["id"], job["lease"], "failed")
+            except HTTPException:
+                pass
+            raise HTTPException(status_code=504, detail="Device did not confirm the command")
+        except (ConnectionError, RuntimeError, OSError):
+            try:
+                tts_queue.ack(code, job["id"], job["lease"], "failed")
+            except HTTPException:
+                pass
+            raise HTTPException(status_code=409, detail="Device disconnected")
+
+        ack_status = "played" if result["status"] == "completed" else "failed"
+        try:
+            tts_queue.ack(code, job["id"], job["lease"], ack_status)
+        except HTTPException:
+            pass
+
+        if result["status"] == "busy":
+            raise HTTPException(status_code=409, detail="Device speaker is busy")
+        if result["status"] == "error":
+            raise HTTPException(status_code=502, detail="Device could not execute the command")
+        return {**result, "job_id": job["id"], "audio_bytes": job["audio_bytes"]}
+
     log_action(
         db, action="device_command", user_id=owner_id, target_type="device",
         target_id=device_id, ip_address=request.client.host if request.client else None,
@@ -95,6 +154,62 @@ async def send_device_command(
     if result["status"] == "error":
         raise HTTPException(status_code=502, detail="Device could not execute the command")
     return result
+
+
+def _require_active_device_by_code(db: Session, device_code: str) -> str:
+    code = normalize_device_code(device_code)
+    device = get_device_by_code(db, user_id=None, device_code=code)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not device.is_active:
+        raise HTTPException(status_code=409, detail="Device is inactive")
+    return code
+
+
+@router.get(
+    "/code/{device_code}/next",
+    response_model=DeviceTTSJob,
+    responses={204: {"description": "No queued TTS job"}},
+)
+def device_next_tts_job(device_code: str, db: Session = Depends(get_db)):
+    """ESP32 nhận job TTS tiếp theo kèm lease để stream PCM vào RAM."""
+    code = _require_active_device_by_code(db, device_code)
+    job = tts_queue.claim_next(code)
+    if not job:
+        return Response(status_code=204)
+    return job
+
+
+@router.get("/code/{device_code}/audio/{job_id}")
+def device_stream_tts_audio(
+    device_code: str,
+    job_id: str,
+    lease: str = Query(..., min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+):
+    """ESP32 tải raw PCM16 mono 24 kHz trực tiếp từ đĩa cache."""
+    code = _require_active_device_by_code(db, device_code)
+    path, audio_bytes = tts_queue.get_job_for_streaming(code, job_id, lease)
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Length": str(audio_bytes),
+            "X-Audio-Sample-Rate": str(SAMPLE_RATE_HZ),
+        },
+    )
+
+
+@router.post("/code/{device_code}/ack", response_model=DeviceTTSAckResponse)
+def device_ack_tts_job(
+    device_code: str,
+    body: DeviceTTSAckRequest,
+    db: Session = Depends(get_db),
+):
+    """ESP32 báo kết quả phát (played hoặc failed) để chốt job."""
+    code = _require_active_device_by_code(db, device_code)
+    return tts_queue.ack(code, body.id, body.lease, body.status)
 
 
 def require_device_logs_enabled():

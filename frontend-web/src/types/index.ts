@@ -105,6 +105,7 @@ export interface EventButton {
 export interface DeviceControlStatus {
   connected: boolean;
   audio_control: boolean;
+  tts_stream?: boolean;
   firmware_version: string | null;
   logs_enabled?: boolean;
 }
@@ -112,6 +113,8 @@ export interface DeviceControlStatus {
 export interface DeviceCommandResult {
   request_id: string;
   status: "completed" | "stopped";
+  job_id?: string;
+  audio_bytes?: number;
 }
 
 export type DeviceSound = "beep" | "greeting" | "checkin";

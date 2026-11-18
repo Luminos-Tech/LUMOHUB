@@ -1,20 +1,29 @@
 import asyncio
 import base64
 import binascii
+import json
 import logging
 import os
+import tempfile
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import Response
-from google import genai
-import google.genai.types as gtypes
-from groq import Groq
+from pydantic import BaseModel, Field, model_validator
 import requests
 
 from app.core.config import settings
 from app.services.deps import get_current_active_user
+from app.services.tts_service import (
+    DEFAULT_BODY_TEMPLATE,
+    SAMPLE_RATE_HZ,
+    cached_pcm,
+    pcm_to_wav_bytes,
+    tts_queue,
+)
 from app.models.user import User
 from app.utils.timezone import local_now
 
@@ -44,6 +53,7 @@ def get_gemini_client():
     if _client_gemini is None:
         if not settings.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY not set")
+        from google import genai
         _client_gemini = genai.Client(api_key=settings.GEMINI_API_KEY)
     return _client_gemini
 
@@ -53,13 +63,75 @@ def get_groq_client():
     if _client_groq is None:
         if not settings.GROQ_API_KEY:
             raise ValueError("GROQ_API_KEY not set")
+        from groq import Groq
         _client_groq = Groq(api_key=settings.GROQ_API_KEY)
     return _client_groq
 
 
 # =========================
+# SCHEMAS
+# =========================
+class TTSSettingsUpdate(BaseModel):
+    provider: str = Field(
+        default="auto",
+        pattern=r"^(|auto|tone|http|elevenlabs|gemini|google_translate)$",
+    )
+    tts_url: str = Field(default="", max_length=2048)
+    api_key: str | None = Field(default=None, max_length=512)
+    clear_api_key: bool = False
+    voice: str = Field(default="Kore", min_length=1, max_length=160)
+    model: str = Field(default="eleven_flash_v2_5", max_length=160)
+    format: str = Field(default="pcm", pattern=r"^(pcm|wav|mp3)$")
+    auth_header: str = Field(default="Authorization", pattern=r"^[A-Za-z0-9-]{1,80}$")
+    auth_prefix: str = Field(default="Bearer", max_length=80)
+    body_template: dict[str, Any] = Field(default_factory=lambda: dict(DEFAULT_BODY_TEMPLATE))
+
+    @model_validator(mode="after")
+    def validate_adapter(self):
+        self.tts_url = self.tts_url.strip()
+        if self.provider == "http":
+            url = urlparse(self.tts_url)
+            if url.scheme != "https" or not url.hostname or url.username or url.password:
+                raise ValueError("URL TTS phải là HTTPS, không chứa username/password")
+            if "{{text}}" not in json.dumps(self.body_template):
+                raise ValueError("JSON gửi tới TTS cần có biến {{text}}")
+        if len(json.dumps(self.body_template)) > 12000:
+            raise ValueError("JSON cấu hình quá dài")
+        if any(ord(c) < 32 or ord(c) > 126 for c in self.auth_prefix):
+            raise ValueError("Tiền tố xác thực phải dùng ký tự ASCII hiển thị được")
+        if self.api_key and any(ord(c) < 32 or ord(c) > 126 for c in self.api_key):
+            raise ValueError("Khóa API phải dùng ký tự ASCII hiển thị được")
+        return self
+
+
+# =========================
 # HELPERS
 # =========================
+_SEARCH_KEYWORDS = (
+    "thời tiết",
+    "tin tức",
+    "giá vàng",
+    "tỷ giá",
+    "hôm nay ngày mấy",
+    "mới nhất",
+    "dự báo",
+    "kết quả",
+    "bao nhiêu độ",
+    "weather",
+    "news",
+    "forecast",
+)
+
+
+def _needs_web_search(query: str) -> bool:
+    if not settings.TAVILY_API_KEY:
+        return False
+    if settings.LUMO_ENABLE_WEB_SEARCH:
+        return True
+    lowered = query.lower()
+    return any(kw in lowered for kw in _SEARCH_KEYWORDS)
+
+
 def get_lumo_history_string(file_path: str, limit: int = 20) -> str:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -79,6 +151,8 @@ def get_lumo_history_string(file_path: str, limit: int = 20) -> str:
 
 
 def _search_web_text(query: str) -> str:
+    if not settings.TAVILY_API_KEY:
+        return ""
     url = "https://api.tavily.com/search"
     headers = {
         "Authorization": f"Bearer {settings.TAVILY_API_KEY}",
@@ -91,9 +165,12 @@ def _search_web_text(query: str) -> str:
         "include_answer": True,
         "max_results": 5,
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
-    resp.raise_for_status()
-    return resp.json().get("answer", "Không có answer")
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        resp.raise_for_status()
+        return resp.json().get("answer", "")
+    except Exception:
+        return ""
 
 
 def _build_lumo_prompt(text: str, search_result: str | None = None) -> str:
@@ -144,7 +221,6 @@ def _pcm_to_wav(pcm_data: bytes, path: str, sample_rate: int = 24000) -> None:
 
 
 def _sample_rate_from_mime(mime_type: str, default: int = 24000) -> int:
-    # Gemini thường trả audio/L16;rate=24000
     for token in mime_type.split(";"):
         token = token.strip()
         if token.startswith("rate="):
@@ -220,58 +296,43 @@ async def lumo_root():
     return {"status": "ok", "message": "LUMO service running"}
 
 
+@router.get("/tts-settings", tags=["LUMO"])
+async def get_tts_settings(current_user: User = Depends(get_current_active_user)):
+    """Xem cấu hình TTS hiện tại (không trả về secret API key)."""
+    return tts_queue.public_tts_settings()
+
+
+@router.put("/tts-settings", tags=["LUMO"])
+async def update_tts_settings(
+    body: TTSSettingsUpdate,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Cập nhật cấu hình TTS runtime (adapter http / elevenlabs / gemini / google_translate / auto)."""
+    return tts_queue.update_tts_settings(body.model_dump())
+
+
 @router.get("/tts-preview", tags=["LUMO"], response_class=Response)
 async def lumo_tts_preview(
     text: str = Query(..., min_length=1, max_length=500),
     voice_name: str = Query("Kore"),
-    current_user: User = Depends(get_current_active_user),
+    format: str = Query("wav", pattern=r"^(wav|pcm)$"),
 ):
-    """Synthesize a short TTS preview without going through the full STT->LLM pipeline.
-
-    Used by the frontend settings page to let the user audition voices. Requires
-    authentication to prevent abuse of the Gemini TTS API key.
-    """
-    if not settings.GEMINI_API_KEY:
-        raise HTTPException(status_code=503, detail="GEMINI_API_KEY not set")
-
+    """Tổng hợp hoặc lấy từ cache SHA-256 cho nghe thử trên web / preview API."""
     def _synthesize():
-        client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        # NOTE: Gemini TTS model `gemini-2.5-flash-preview-tts` intermittently
-        # returns 400 INVALID_ARGUMENT ("Model tried to generate text, but it
-        # should only be used for TTS") even when given plain transcript input.
-        # The full /audio/ pipeline uses the same model on the LLM-derived
-        # transcript and works reliably; only this preview endpoint hits it.
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash-preview-tts",
-            contents=text,
-            config=gtypes.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=gtypes.SpeechConfig(
-                    voice_config=gtypes.VoiceConfig(
-                        prebuilt_voice_config=gtypes.PrebuiltVoiceConfig(
-                            voice_name=voice_name,
-                        )
-                    )
-                ),
-            ),
-        )
-        inline = resp.candidates[0].content.parts[0].inline_data
-        audio_bytes = _extract_inline_audio_bytes(inline.data)
-        if inline.mime_type == "audio/wav":
-            return audio_bytes, inline.mime_type
-        sample_rate = _sample_rate_from_mime(inline.mime_type, default=24000)
-        tmp = f"/tmp/lumo_tts_preview_{os.getpid()}.wav"
-        try:
-            _pcm_to_wav(audio_bytes, tmp, sample_rate=sample_rate)
-            with open(tmp, "rb") as f:
-                wav = f.read()
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-        return wav, "audio/wav"
+        _, pcm = cached_pcm(text, voice=voice_name)
+        if format == "pcm":
+            return pcm, "application/octet-stream"
+        return pcm_to_wav_bytes(pcm, sample_rate=SAMPLE_RATE_HZ), "audio/wav"
 
-    wav_bytes, mime = await _run_sync_in_executor(_synthesize)
-    return Response(content=wav_bytes, media_type=mime)
+    audio_bytes, mime = await _run_sync_in_executor(_synthesize)
+    return Response(
+        content=audio_bytes,
+        media_type=mime,
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "Content-Length": str(len(audio_bytes)),
+        },
+    )
 
 
 @router.get("/version1", tags=["LUMO Versions"])
@@ -280,6 +341,8 @@ async def lumo_version1(
     textLumoCallServer: str = Query(..., min_length=1),
     assistant_name: str = "LUMO",
 ):
+    import google.genai.types as gtypes
+
     prompt = _build_lumo_prompt(textLumoCallServer)
     client = get_gemini_client()
     response = await _run_sync_in_executor(
@@ -306,20 +369,16 @@ async def lumo_version2(
     textLumoCallServer: str = Query(..., min_length=1),
     assistant_name: str = "LUMO",
 ):
-    loop = asyncio.get_running_loop()
-
     def _call():
-        search_result = _search_web_text(textLumoCallServer)
+        search_result = _search_web_text(textLumoCallServer) if _needs_web_search(textLumoCallServer) else None
         prompt = _build_lumo_prompt(textLumoCallServer, search_result)
-        if not settings.GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY not set")
-        temp_client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        return temp_client.models.generate_content(
+        client = get_gemini_client()
+        return client.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
         ).text
 
-    response_text = await _run_sync_in_executor(lambda: _call())
+    response_text = await _run_sync_in_executor(_call)
     lumo_logger.info(f"user: {textLumoCallServer}")
     lumo_logger.info(f"Lumo: {response_text}")
     return {
@@ -370,8 +429,8 @@ async def lumo_version3(
 @router.post("/wakeword/verify", tags=["LUMO Wakeword"])
 async def lumo_wakeword_verify(audio: UploadFile = File(...)):
     pid = os.getpid()
-    suffix = os.path.splitext(audio.filename)[-1] or ".wav"
-    tmp_in = f"/tmp/lumo_wakeword_{pid}{suffix}"
+    suffix = os.path.splitext(audio.filename or "audio.wav")[-1] or ".wav"
+    tmp_in = os.path.join(tempfile.gettempdir(), f"lumo_wakeword_{pid}_{id(audio)}{suffix}")
 
     content = await audio.read()
 
@@ -412,21 +471,18 @@ async def lumo_wakeword_verify(audio: UploadFile = File(...)):
 
 @router.post("/audio/", tags=["LUMO Audio"])
 async def lumo_audio(request: Request, audio: UploadFile = File(...)):
-    """Voice pipeline: STT (Groq Whisper) → TTT (Gemini) → TTS (Gemini 2.5 TTS).
+    """Voice pipeline: STT (Groq Whisper) → TTT (Gemini) → Fast TTS + SHA-256 Cache.
 
-    Returns raw WAV binary when the client sends  Accept: audio/wav  (ESP32 path).
-    Falls back to JSON {audio_base64,...} for browsers / other clients.
+    Trả raw PCM (Accept: audio/pcm hoặc application/octet-stream), raw WAV (Accept: audio/wav)
+    hoặc JSON {audio_base64, ...} cho browser.
     """
     pid = os.getpid()
-    tmp_in = f"/tmp/esp32_in_{pid}.wav"
-    tmp_out = f"/tmp/esp32_out_{pid}.wav"
+    suffix = os.path.splitext(audio.filename or "audio.wav")[-1] or ".wav"
+    tmp_in = os.path.join(tempfile.gettempdir(), f"esp32_in_{pid}_{id(audio)}{suffix}")
 
-    # ── Check if ESP32 wants raw WAV bytes ──────────────────────────────
-    accept = request.headers.get("accept", "")
-    want_wav = ("audio/wav" in accept or "*/*" in accept) and "json" not in accept
-    if want_wav:
-        suffix = os.path.splitext(audio.filename)[-1] or ".wav"
-        tmp_in = f"/tmp/esp32_in_{pid}{suffix}"
+    accept = (request.headers.get("accept", "") or "").lower()
+    want_pcm = "audio/pcm" in accept or "application/octet-stream" in accept
+    want_wav = not want_pcm and ("audio/wav" in accept or "*/*" in accept) and "json" not in accept
 
     content = await audio.read()
 
@@ -440,27 +496,27 @@ async def lumo_audio(request: Request, audio: UploadFile = File(...)):
             def _stt():
                 with open(tmp_in, "rb") as f:
                     return groq_cli.audio.transcriptions.create(
-                        file=(audio.filename, f.read()),
+                        file=(audio.filename or "record.wav", f.read()),
                         model="whisper-large-v3-turbo",
                         temperature=0,
                         response_format="verbose_json",
                     ).text.strip()
 
-            lumo_logger.info(f"[AUDIO] STT start")
+            lumo_logger.info("[AUDIO] STT start")
             stt_text = await _run_sync_in_executor(_stt)
             lumo_logger.info(f"[AUDIO] STT result: '{stt_text}'")
             if not stt_text:
                 lumo_logger.error("[AUDIO] STT returned empty")
                 raise HTTPException(status_code=422, detail="STT returned empty text")
 
-            lumo_logger.info(f"[AUDIO] Search web start")
-            search_result = await _run_sync_in_executor(_search_web_text, stt_text)
-            lumo_logger.info(f"[AUDIO] Search done: '{search_result}'")
-            prompt = _build_lumo_prompt(stt_text, search_result)
+            search_result = None
+            if _needs_web_search(stt_text):
+                lumo_logger.info("[AUDIO] Search web start")
+                search_result = await _run_sync_in_executor(_search_web_text, stt_text)
+                lumo_logger.info(f"[AUDIO] Search done: '{search_result}'")
 
-            if not settings.GEMINI_API_KEY:
-                raise ValueError("GEMINI_API_KEY not set")
-            gemini_cli = genai.Client(api_key=settings.GEMINI_API_KEY)
+            prompt = _build_lumo_prompt(stt_text, search_result)
+            gemini_cli = get_gemini_client()
 
             def _ttt():
                 return gemini_cli.models.generate_content(
@@ -468,72 +524,43 @@ async def lumo_audio(request: Request, audio: UploadFile = File(...)):
                     contents=prompt,
                 ).text
 
-            lumo_logger.info(f"[AUDIO] TTT start")
+            lumo_logger.info("[AUDIO] TTT start")
             v2_answer = await _run_sync_in_executor(_ttt)
             lumo_logger.info(f"[AUDIO] TTT result: '{v2_answer}'")
             if not v2_answer:
                 lumo_logger.error("[AUDIO] TTT returned empty")
                 raise HTTPException(status_code=500, detail="version2 returned empty response")
 
-            if not settings.GEMINI_API_KEY:
-                raise ValueError("GEMINI_API_KEY not set")
-            tts_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            lumo_logger.info("[AUDIO] Fast TTS/cache start")
+            _, pcm_bytes = await _run_sync_in_executor(cached_pcm, v2_answer, "Kore")
+            lumo_logger.info(f"[AUDIO] TTS done: pcm={len(pcm_bytes)} bytes")
 
-            def _tts():
-                return tts_client.models.generate_content(
-                    model="gemini-2.5-flash-preview-tts",
-                    contents=v2_answer,
-                    config=gtypes.GenerateContentConfig(
-                        response_modalities=["AUDIO"],
-                        speech_config=gtypes.SpeechConfig(
-                            voice_config=gtypes.VoiceConfig(
-                                prebuilt_voice_config=gtypes.PrebuiltVoiceConfig(
-                                    voice_name="Kore",
-                                )
-                            )
-                        ),
-                    ),
-                )
+            return stt_text, v2_answer, pcm_bytes
 
-            lumo_logger.info(f"[AUDIO] TTS start")
-            tts_resp = await _run_sync_in_executor(_tts)
-            inline_data = tts_resp.candidates[0].content.parts[0].inline_data
-            raw_audio = inline_data.data
-            mime_type = inline_data.mime_type
-            audio_bytes = _extract_inline_audio_bytes(raw_audio)
-            lumo_logger.info(
-                f"[AUDIO] TTS done: raw={len(raw_audio)} bytes, decoded={len(audio_bytes)} bytes, mime={mime_type}"
-            )
-
-            if mime_type == "audio/wav":
-                with open(tmp_out, "wb") as f:
-                    f.write(audio_bytes)
-            else:
-                sample_rate = _sample_rate_from_mime(mime_type, default=24000)
-                if not (mime_type.startswith("audio/L16") or mime_type == "audio/pcm"):
-                    lumo_logger.warning(
-                        f"[AUDIO] Unknown audio mime type: {mime_type}, using PCM fallback at {sample_rate} Hz"
-                    )
-                _pcm_to_wav(audio_bytes, tmp_out, sample_rate=sample_rate)
-
-            return stt_text, v2_answer
-
-        stt_text, v2_answer = await _run_pipeline()
+        stt_text, v2_answer, pcm_bytes = await _run_pipeline()
         lumo_logger.info(f"user: {stt_text}")
         lumo_logger.info(f"Lumo: {v2_answer}")
 
-        with open(tmp_out, "rb") as f:
-            wav_bytes = f.read()
+        if want_pcm:
+            return Response(
+                content=pcm_bytes,
+                media_type="application/octet-stream",
+                headers={
+                    "X-Audio-Sample-Rate": str(SAMPLE_RATE_HZ),
+                    "X-Audio-Format": "pcm_s16le",
+                    "Content-Length": str(len(pcm_bytes)),
+                    "Cache-Control": "no-store",
+                },
+            )
 
+        wav_bytes = pcm_to_wav_bytes(pcm_bytes, sample_rate=SAMPLE_RATE_HZ)
         if want_wav:
-            # ESP32 path: trả raw WAV binary thẳng, không bọc JSON.
-            # esp_http_client đọc resp.buffer → ghi thẳng vào .wav file → play.
-            from fastapi.responses import Response
             return Response(
                 content=wav_bytes,
                 media_type="audio/wav",
                 headers={
                     "Content-Disposition": "attachment; filename=response.wav",
+                    "Content-Length": str(len(wav_bytes)),
                 },
             )
 
@@ -552,5 +579,3 @@ async def lumo_audio(request: Request, audio: UploadFile = File(...)):
     finally:
         if os.path.exists(tmp_in):
             os.unlink(tmp_in)
-        if os.path.exists(tmp_out):
-            os.unlink(tmp_out)

@@ -62,6 +62,20 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: str = ""
     TAVILY_API_KEY: str = ""
     LUMO_LOG_PATH: str = "system.log"
+    LUMO_ENABLE_WEB_SEARCH: bool = False
+
+    # Fast TTS & Audio Cache (DSOFT-AudioTTS integration)
+    TTS_PROVIDER: str = "auto"
+    TTS_URL: str = ""
+    TTS_API_KEY: str = ""
+    ELEVENLABS_API_KEY: str = ""
+    ELEVENLABS_VOICE_ID: str = "21m00Tcm4TlvDq8ikWAM"
+    TTS_VOICE: str = "Kore"
+    TTS_MODEL: str = "eleven_flash_v2_5"
+    TTS_RESPONSE_FORMAT: str = "pcm"
+    TTS_AUTH_HEADER: str = "Authorization"
+    TTS_AUTH_PREFIX: str = "Bearer"
+    TTS_CACHE_DIR: str = "data/tts_cache"
 
     # Web Push 通知配置 (VAPID keys)
     # Nếu không có trong .env, sẽ tự động tạo (chỉ dùng cho dev)

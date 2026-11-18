@@ -23,6 +23,9 @@ export const devicesApi = {
   playSound: (id: number, sound: DeviceSound) =>
     api.post<DeviceCommandResult>(`/devices/${id}/commands`, { action: "play_sound", sound }, { timeout: 25000 }),
 
+  speakText: (id: number, text: string, volume = 80) =>
+    api.post<DeviceCommandResult>(`/devices/${id}/commands`, { action: "speak", text, volume }, { timeout: 45000 }),
+
   stopAudio: (id: number) =>
     api.post<DeviceCommandResult>(`/devices/${id}/commands`, { action: "stop_audio" }, { timeout: 25000 }),
 };

@@ -14,6 +14,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "audio/audio_player.h"
+#include "http_api/http_api.h"
 #include "wifi/wifi_manager.h"
 #include "ble/lumo_band_central.h"
 
@@ -22,6 +23,7 @@ static esp_websocket_client_handle_t s_client;
 static QueueHandle_t s_commands;
 static QueueHandle_t s_logs;
 static char s_uri[256];
+static char s_api_base_url[256];
 static char s_device_code[16];
 static char s_firmware_version[64];
 static volatile uint32_t s_cancel_generation;
@@ -31,8 +33,14 @@ static volatile uint32_t s_connected_at_ms;
 static volatile uint32_t s_connection_generation;
 
 typedef struct {
+    bool is_tts;
     char request_id[33];
     char sound[16];
+    char job_id[65];
+    char lease[65];
+    char audio_path[192];
+    int volume;
+    int audio_bytes;
     uint32_t generation;
 } sound_command_t;
 
@@ -74,6 +82,24 @@ static bool send_json(cJSON *message)
     return sent;
 }
 
+static void derive_api_base_url(const char *ws_url, char *out, size_t out_size)
+{
+    if (strncmp(ws_url, "wss://", 6) == 0) {
+        snprintf(out, out_size, "https://%s", ws_url + 6);
+    } else if (strncmp(ws_url, "ws://", 5) == 0) {
+        snprintf(out, out_size, "http://%s", ws_url + 5);
+    } else {
+        snprintf(out, out_size, "%s", ws_url);
+    }
+    char *scheme_end = strstr(out, "://");
+    if (scheme_end != NULL) {
+        char *path_start = strchr(scheme_end + 3, '/');
+        if (path_start != NULL) {
+            *path_start = '\0';
+        }
+    }
+}
+
 static bool send_hello(void)
 {
     cJSON *hello = cJSON_CreateObject();
@@ -84,6 +110,7 @@ static bool send_hello(void)
     cJSON *capabilities = cJSON_AddArrayToObject(hello, "capabilities");
     cJSON_AddItemToArray(capabilities, cJSON_CreateString("audio_control_v1"));
     cJSON_AddItemToArray(capabilities, cJSON_CreateString("device_logs_v1"));
+    cJSON_AddItemToArray(capabilities, cJSON_CreateString("tts_stream_v1"));
     bool sent = send_json(hello);
     ESP_LOGI(TAG, "Hub %s registration handshake: %s",
              s_device_code, sent ? "sent; waiting for backend confirmation" : "send failed");
@@ -175,9 +202,38 @@ static void handle_message(const char *text)
             send_result(id->valuestring, "error");
         } else {
             sound_command_t command = {0};
+            command.is_tts = false;
             command.generation = s_cancel_generation;
             snprintf(command.request_id, sizeof(command.request_id), "%s", id->valuestring);
             snprintf(command.sound, sizeof(command.sound), "%s", sound->valuestring);
+            if (audio_is_playing() || xQueueSend(s_commands, &command, 0) != pdTRUE) {
+                send_result(id->valuestring, "busy");
+            }
+        }
+    } else if (strcmp(action->valuestring, "speak") == 0) {
+        const cJSON *job_id = cJSON_GetObjectItemCaseSensitive(message, "job_id");
+        const cJSON *lease = cJSON_GetObjectItemCaseSensitive(message, "lease");
+        const cJSON *volume = cJSON_GetObjectItemCaseSensitive(message, "volume");
+        const cJSON *audio_bytes = cJSON_GetObjectItemCaseSensitive(message, "audio_bytes");
+        const cJSON *audio_path = cJSON_GetObjectItemCaseSensitive(message, "audio_path");
+        if (!cJSON_IsString(job_id) || !cJSON_IsString(lease)) {
+            send_result(id->valuestring, "error");
+        } else {
+            sound_command_t command = {0};
+            command.is_tts = true;
+            command.generation = s_cancel_generation;
+            command.volume = cJSON_IsNumber(volume) ? volume->valueint : 80;
+            command.audio_bytes = cJSON_IsNumber(audio_bytes) ? audio_bytes->valueint : 0;
+            snprintf(command.request_id, sizeof(command.request_id), "%s", id->valuestring);
+            snprintf(command.job_id, sizeof(command.job_id), "%s", job_id->valuestring);
+            snprintf(command.lease, sizeof(command.lease), "%s", lease->valuestring);
+            if (cJSON_IsString(audio_path) && audio_path->valuestring[0]) {
+                snprintf(command.audio_path, sizeof(command.audio_path), "%s", audio_path->valuestring);
+            } else {
+                snprintf(command.audio_path, sizeof(command.audio_path),
+                         "/api/v1/devices/code/%s/audio/%s?lease=%s",
+                         s_device_code, command.job_id, command.lease);
+            }
             if (audio_is_playing() || xQueueSend(s_commands, &command, 0) != pdTRUE) {
                 send_result(id->valuestring, "busy");
             }
@@ -256,18 +312,57 @@ static void sound_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_commands, &command, portMAX_DELAY) == pdTRUE) {
             if (command.generation != s_cancel_generation) {
-                send_result(command.request_id, "stopped");
+                if (command.request_id[0]) {
+                    send_result(command.request_id, "stopped");
+                }
+                if (command.is_tts && command.job_id[0] && command.lease[0]) {
+                    http_tts_job_t job = {0};
+                    snprintf(job.id, sizeof(job.id), "%s", command.job_id);
+                    snprintf(job.lease, sizeof(job.lease), "%s", command.lease);
+                    http_api_ack_tts_job(s_api_base_url, s_device_code, &job, false);
+                }
                 continue;
             }
-            ESP_LOGI(TAG, "Web requested sound: %s", command.sound);
-            char line[64];
-            snprintf(line, sizeof(line), "Web requested sound: %s", command.sound);
-            device_control_log('I', "AUDIO", line);
-            esp_err_t err = audio_play(sound_path(command.sound));
-            send_result(command.request_id,
-                        command.generation != s_cancel_generation ? "stopped" :
-                        err == ESP_OK ? "completed" :
-                        err == ESP_ERR_INVALID_STATE ? "busy" : "error");
+            if (command.is_tts) {
+                char full_url[460];
+                if (strncmp(command.audio_path, "http://", 7) == 0 ||
+                    strncmp(command.audio_path, "https://", 8) == 0) {
+                    snprintf(full_url, sizeof(full_url), "%s", command.audio_path);
+                } else {
+                    snprintf(full_url, sizeof(full_url), "%s%s", s_api_base_url, command.audio_path);
+                }
+                ESP_LOGI(TAG, "Streaming TTS job %s (%d bytes)", command.job_id, command.audio_bytes);
+                device_control_log('I', "AUDIO", "Streaming TTS audio into RAM");
+                esp_err_t err = http_api_stream_pcm_url(
+                    full_url,
+                    (unsigned)(command.volume >= 0 ? command.volume : 80),
+                    command.audio_bytes);
+                const char *status =
+                    command.generation != s_cancel_generation ? "stopped" :
+                    err == ESP_OK ? "completed" :
+                    err == ESP_ERR_INVALID_STATE ? "busy" : "error";
+                if (command.request_id[0]) {
+                    send_result(command.request_id, status);
+                }
+                if (command.job_id[0] && command.lease[0]) {
+                    http_tts_job_t job = {0};
+                    snprintf(job.id, sizeof(job.id), "%s", command.job_id);
+                    snprintf(job.lease, sizeof(job.lease), "%s", command.lease);
+                    http_api_ack_tts_job(s_api_base_url, s_device_code, &job, err == ESP_OK);
+                }
+            } else {
+                ESP_LOGI(TAG, "Web requested sound: %s", command.sound);
+                char line[64];
+                snprintf(line, sizeof(line), "Web requested sound: %s", command.sound);
+                device_control_log('I', "AUDIO", line);
+                esp_err_t err = audio_play(sound_path(command.sound));
+                if (command.request_id[0]) {
+                    send_result(command.request_id,
+                                command.generation != s_cancel_generation ? "stopped" :
+                                err == ESP_OK ? "completed" :
+                                err == ESP_ERR_INVALID_STATE ? "busy" : "error");
+                }
+            }
         }
     }
 }
@@ -341,6 +436,7 @@ static void connection_task(void *arg)
     uint32_t last_ping_ms = 0;
     uint32_t last_status_ms = 0;
     uint32_t last_mpu_ms = 0;
+    uint32_t last_tts_poll_ms = 0;
     for (;;) {
         if (wifi_is_connected() && esp_websocket_client_is_connected(s_client)) {
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
@@ -372,6 +468,26 @@ static void connection_task(void *arg)
                     device_control_log('I', "HUB", line);
                     last_status_ms = now_ms;
                 }
+                if (!audio_is_playing() && uxQueueMessagesWaiting(s_commands) == 0 &&
+                    (uint32_t)(now_ms - last_tts_poll_ms) >= 3000) {
+                    last_tts_poll_ms = now_ms;
+                    http_tts_job_t queued_job;
+                    if (http_api_poll_next_tts_job(s_api_base_url, s_device_code, &queued_job)) {
+                        sound_command_t command = {0};
+                        command.is_tts = true;
+                        command.generation = s_cancel_generation;
+                        command.volume = queued_job.volume_percent;
+                        command.audio_bytes = queued_job.audio_bytes;
+                        snprintf(command.job_id, sizeof(command.job_id), "%s", queued_job.id);
+                        snprintf(command.lease, sizeof(command.lease), "%s", queued_job.lease);
+                        snprintf(command.audio_path, sizeof(command.audio_path),
+                                 "/api/v1/devices/code/%s/audio/%s?lease=%s",
+                                 s_device_code, command.job_id, command.lease);
+                        if (xQueueSend(s_commands, &command, 0) != pdTRUE) {
+                            http_api_ack_tts_job(s_api_base_url, s_device_code, &queued_job, false);
+                        }
+                    }
+                }
                 flush_logs();
             }
         }
@@ -383,6 +499,7 @@ esp_err_t device_control_start(const char *device_code, const char *firmware_ver
 {
     snprintf(s_device_code, sizeof(s_device_code), "%s", device_code);
     snprintf(s_firmware_version, sizeof(s_firmware_version), "%s", firmware_version);
+    derive_api_base_url(CONFIG_LUMO_CONTROL_WS_URL, s_api_base_url, sizeof(s_api_base_url));
     int length = snprintf(s_uri, sizeof(s_uri), "%s?device_id=%s",
                           CONFIG_LUMO_CONTROL_WS_URL, device_code);
     if (length < 0 || length >= sizeof(s_uri)) return ESP_ERR_INVALID_SIZE;
@@ -413,9 +530,9 @@ esp_err_t device_control_start(const char *device_code, const char *firmware_ver
     esp_err_t err = esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, websocket_event, NULL);
     if (err != ESP_OK) return err;
     if (xTaskCreate(sound_task, "web_sound", 8192, NULL, 4, NULL) != pdPASS ||
-        xTaskCreate(connection_task, "web_connect", 6144, NULL, 3, NULL) != pdPASS) {
+        xTaskCreate(connection_task, "web_connect", 8192, NULL, 3, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "Web control configured: %s", s_uri);
+    ESP_LOGI(TAG, "Web control configured: %s (HTTP base: %s)", s_uri, s_api_base_url);
     return ESP_OK;
 }

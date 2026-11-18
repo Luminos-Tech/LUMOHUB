@@ -76,6 +76,7 @@ elseif(MODE STREQUAL "full")
             "device_control/device_control.c"
             "ble/lumo_band_central.c"
             "ble/lumo_band_state.c"
+            "ble/lumo_imu_ai.c"
             "audio/audio_player.c"
             "button/button.c"
             "wifi/web_portal.c"

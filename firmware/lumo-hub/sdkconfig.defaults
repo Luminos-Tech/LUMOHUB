@@ -1,4 +1,7 @@
 CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # ── Main task stack ─────────────────────────────────────────────
 # Bump từ 8192 (mặc định) lên 16384 để chứa: SPIFFS list, audio_play()

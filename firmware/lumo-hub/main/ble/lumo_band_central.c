@@ -19,6 +19,8 @@
 
 #include "lumo_band_central.h"
 #include "lumo_band_state.h"
+#include "lumo_imu_ai.h"
+#include "device_control/device_control.h"
 
 #define TARGET_NAME "LUMO-TEST-C3"
 #define SAMPLE_SIZE 12U
@@ -29,6 +31,8 @@
 static const char *TAG = "BAND_BLE";
 static portMUX_TYPE s_diagnostic_lock = portMUX_INITIALIZER_UNLOCKED;
 static lumo_band_diagnostic_t s_diagnostic;
+static bool s_pending_impact_eval = false;
+static uint64_t s_pending_impact_ms = 0;
 
 void lumo_band_get_diagnostic(lumo_band_diagnostic_t *snapshot)
 {
@@ -391,6 +395,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             const uint8_t version = payload[0];
             const uint8_t state = payload[1];
             if (version == MPU_DIAGNOSTIC_VERSION && length == MPU_DIAGNOSTIC_SIZE && state <= 4) {
+                const uint64_t now_ms = esp_timer_get_time() / 1000ULL;
                 portENTER_CRITICAL(&s_diagnostic_lock);
                 s_diagnostic.has_diagnostic = true;
                 s_diagnostic.has_sample = true;
@@ -402,9 +407,47 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                     s_diagnostic.gyro_raw[i] = (int16_t)read_u16_le(&payload[12 + 2 * i]);
                 }
                 s_diagnostic.magnitude_x100 = read_u16_le(&payload[18]);
-                s_diagnostic.diagnostic_at_ms = esp_timer_get_time() / 1000ULL;
-                s_diagnostic.received_at_ms = s_diagnostic.diagnostic_at_ms;
+                s_diagnostic.diagnostic_at_ms = now_ms;
+                s_diagnostic.received_at_ms = now_ms;
                 portEXIT_CRITICAL(&s_diagnostic_lock);
+
+                if (state != 4) {
+                    lumo_ai_push_raw_mpu6050(
+                        s_diagnostic.accel_raw[0], s_diagnostic.accel_raw[1], s_diagnostic.accel_raw[2],
+                        s_diagnostic.gyro_raw[0], s_diagnostic.gyro_raw[1], s_diagnostic.gyro_raw[2],
+                        now_ms
+                    );
+                    const float mag_g = (float)s_diagnostic.magnitude_x100 / 100.0f;
+                    if (!s_pending_impact_eval && (state == 2 || mag_g >= 2.5f)) {
+                        s_pending_impact_eval = true;
+                        s_pending_impact_ms = now_ms;
+                        g_band_state.ai_ready = false;
+                        g_band_state.ai_pending = true;
+                        g_band_state.ai_pending_ms = now_ms;
+                        g_band_state.ai_suppressed = false;
+                        ESP_LOGW(TAG, "Impact burst detected (%.2fg); buffering 1.8s post-impact for Hub Dual-AI",
+                                 (double)mag_g);
+                    }
+                    if (s_pending_impact_eval &&
+                        (now_ms - s_pending_impact_ms) >= 1800ULL &&
+                        lumo_ai_buffer_ready()) {
+                        lumo_ai_dual_result_t ai_res;
+                        s_pending_impact_eval = false;
+                        if (lumo_ai_evaluate_ring(&ai_res)) {
+                            band_state_update_ai(&ai_res);
+                            ESP_LOGW(TAG, "[LUMO_AI] RF=%s(%u%%,%luus) | MLP=%s(%u%%,%luus) | CNN=%s(%u%%,%luus) | FUSED=%s(%u%%)",
+                                     lumo_ai_class_name(ai_res.rf.pred_class), ai_res.rf.confidence_pct, (unsigned long)ai_res.rf.latency_us,
+                                     lumo_ai_class_name(ai_res.mlp.pred_class), ai_res.mlp.confidence_pct, (unsigned long)ai_res.mlp.latency_us,
+                                     lumo_ai_class_name(ai_res.cnn.pred_class), ai_res.cnn.confidence_pct, (unsigned long)ai_res.cnn.latency_us,
+                                     lumo_ai_class_name(ai_res.final_class), ai_res.final_confidence_pct);
+                            device_control_log(
+                                ai_res.should_trigger_voice_check ? 'E' : 'I',
+                                "LUMO_AI",
+                                ai_res.commentary
+                            );
+                        }
+                    }
+                }
                 return 0;
             }
             if (version != BLE_PAYLOAD_VERSION || length != SAMPLE_SIZE || state > 4) {
@@ -417,10 +460,17 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             const uint8_t heart_rate = payload[6];
             const uint16_t steps = read_u16_le(&payload[7]);
             const uint8_t battery = payload[9];
+            const uint8_t band_ai_cls = payload[10];
+            const uint8_t band_ai_conf = payload[11];
 
             /* Update shared state — consumed by main task's alert evaluator */
             band_state_update(state, heart_rate, steps, battery,
                              magnitude_x100, peak1s_x100);
+            if (band_ai_cls < LUMO_AI_NUM_CLASSES && band_ai_conf > 0) {
+                ESP_LOGI(TAG, "Band edge AI tag: %s (%u%%)",
+                         lumo_ai_class_name((lumo_ai_class_t)band_ai_cls),
+                         (unsigned)band_ai_conf);
+            }
             portENTER_CRITICAL(&s_diagnostic_lock);
             s_diagnostic.has_sample = true;
             if (!s_diagnostic.has_diagnostic) {
@@ -532,6 +582,8 @@ static void host_task(void *param)
 
 esp_err_t lumo_band_central_start(void)
 {
+    lumo_ai_init();
+    lumo_ai_run_self_test();
     esp_err_t err = nvs_flash_init();
 
     if (err == ESP_ERR_NVS_NO_FREE_PAGES ||

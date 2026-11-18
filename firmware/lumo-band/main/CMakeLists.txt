@@ -3,6 +3,7 @@ idf_component_register(
     SRCS
         "../src/main.c"
         "../src/mpu6050.c"
+        "../src/lumo_imu_ai.c"
     INCLUDE_DIRS
         "../include"
     REQUIRES

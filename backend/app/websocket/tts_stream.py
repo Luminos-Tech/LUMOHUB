@@ -1,22 +1,18 @@
 import asyncio
-import io
 import json
 import logging
-import wave
+import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from google import genai
-import google.genai.types as gtypes
 import requests
-from groq import Groq
 
 from app.core.config import settings
+from app.services.tts_service import cached_pcm, pcm_to_wav_bytes
 from app.websocket.manager import manager
 from app.utils.timezone import local_now
 
-# WAV format for ESP32 audio_stream
-# Gemini TTS: 24kHz mono 16-bit LINEAR16
 WAV_SAMPLE_RATE = 24000
 WAV_CHANNELS = 1
 WAV_SAMP_WIDTH = 2
@@ -35,10 +31,35 @@ if not lumo_logger.handlers:
 _gemini_client = None
 _groq_client = None
 
+_SEARCH_KEYWORDS = (
+    "thời tiết",
+    "tin tức",
+    "giá vàng",
+    "tỷ giá",
+    "hôm nay ngày mấy",
+    "mới nhất",
+    "dự báo",
+    "kết quả",
+    "bao nhiêu độ",
+    "weather",
+    "news",
+    "forecast",
+)
+
+
+def _needs_web_search(query: str) -> bool:
+    if not settings.TAVILY_API_KEY:
+        return False
+    if settings.LUMO_ENABLE_WEB_SEARCH:
+        return True
+    lowered = query.lower()
+    return any(kw in lowered for kw in _SEARCH_KEYWORDS)
+
 
 def _get_gemini():
     global _gemini_client
     if _gemini_client is None:
+        from google import genai
         _gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
     return _gemini_client
 
@@ -46,11 +67,10 @@ def _get_gemini():
 def _get_groq():
     global _groq_client
     if _groq_client is None:
+        from groq import Groq
         _groq_client = Groq(api_key=settings.GROQ_API_KEY)
     return _groq_client
 
-
-# ─── LUMO PROMPT BUILDER ────────────────────────────────────────────────────
 
 def _get_lumo_history_string(file_path: str, limit: int = 20) -> str:
     try:
@@ -71,11 +91,13 @@ def _get_lumo_history_string(file_path: str, limit: int = 20) -> str:
 
 
 def _search_web_text(query: str) -> str:
+    if not settings.TAVILY_API_KEY:
+        return ""
     url = "https://api.tavily.com/search"
     headers = {"Authorization": f"Bearer {settings.TAVILY_API_KEY}", "Content-Type": "application/json"}
     payload = {"query": query, "topic": "general", "search_depth": "basic", "include_answer": True, "max_results": 5}
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
         resp.raise_for_status()
         return resp.json().get("answer", "")
     except Exception:
@@ -121,33 +143,6 @@ Người dùng: {text}
 LUMO:"""
 
 
-def _pcm_to_wav(pcm_data: bytes, path: str, sample_rate: int = 24000) -> None:
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_data)
-
-
-# ─── WAV HEADER PARSING (for Gemini audio chunks) ─────────────────────────
-
-def _parse_wav_header(data: bytes):
-    if len(data) < 44:
-        return None
-    try:
-        with wave.open(io.BytesIO(data)) as w:
-            return {
-                "channels": w.getnchannels(),
-                "sampwidth": w.getsampwidth(),
-                "framerate": w.getframerate(),
-                "nframes": w.getnframes(),
-            }
-    except Exception:
-        return None
-
-
-# ─── STT (Groq Whisper) ────────────────────────────────────────────────────
-
 async def _run_stt(audio_path: str) -> str:
     loop = asyncio.get_running_loop()
 
@@ -165,13 +160,11 @@ async def _run_stt(audio_path: str) -> str:
     return await loop.run_in_executor(executor, _call)
 
 
-# ─── LLM (Gemini) ─────────────────────────────────────────────────────────
-
 async def _run_llm(text: str) -> str:
     loop = asyncio.get_running_loop()
 
     def _call():
-        search_result = _search_web_text(text)
+        search_result = _search_web_text(text) if _needs_web_search(text) else None
         prompt = _build_lumo_prompt(text, search_result)
         client = _get_gemini()
         resp = client.models.generate_content(
@@ -183,88 +176,29 @@ async def _run_llm(text: str) -> str:
     return await loop.run_in_executor(executor, _call)
 
 
-# ─── WAV BUILDER ──────────────────────────────────────────────────────────
-
 def _make_wav_bytes(pcm_data: bytes) -> bytes:
     """Build a complete WAV file from raw PCM bytes."""
-    data_len = len(pcm_data)
-    byte_rate = WAV_SAMPLE_RATE * WAV_CHANNELS * WAV_SAMP_WIDTH
-    block_align = WAV_CHANNELS * WAV_SAMP_WIDTH
-    header = bytearray()
-    def w32(v: int): header.extend(v.to_bytes(4, "little"))
-    def w16(v: int): header.extend(v.to_bytes(2, "little"))
-    header.extend(b"RIFF")
-    w32(36 + data_len)
-    header.extend(b"WAVE")
-    header.extend(b"fmt ")
-    w32(16)          # PCM format
-    w16(1)           # AudioFormat = PCM
-    w16(WAV_CHANNELS)
-    w32(WAV_SAMPLE_RATE)
-    w32(byte_rate)
-    w16(block_align)
-    w16(WAV_SAMP_WIDTH * 8)
-    header.extend(b"data")
-    w32(data_len)
-    return bytes(header) + pcm_data
+    return pcm_to_wav_bytes(pcm_data, sample_rate=WAV_SAMPLE_RATE)
 
 
-# ─── STREAMING TTS (Gemini → binary chunks → WebSocket) ───────────────────
-
-async def _stream_tts(text: str, websocket: WebSocket, device_id: str):
-    """Collect TTS audio from Gemini in a thread, then send as WAV."""
+async def _stream_tts(text: str, websocket: WebSocket, device_id: str, raw_pcm: bool = False):
+    """Lấy PCM từ fast TTS + SHA-256 cache trong thread pool rồi gửi qua WebSocket."""
     loop = asyncio.get_running_loop()
 
     def _collect_pcm():
-        """Run blocking Gemini TTS stream in a thread pool — won't block the event loop."""
-        client = _get_gemini()
-        response = client.models.generate_content_stream(
-            model="gemini-2.5-flash-preview-tts",
-            contents=text,
-            config=gtypes.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=gtypes.SpeechConfig(
-                    voice_config=gtypes.VoiceConfig(
-                        prebuilt_voice_config=gtypes.PrebuiltVoiceConfig(
-                            voice_name="Kore",
-                        )
-                    )
-                ),
-            ),
-        )
-        pcm = b""
-        count = 0
-        for chunk in response:
-            candidates = getattr(chunk, "candidates", None)
-            if not candidates:
-                continue
-            content = getattr(candidates[0], "content", None)
-            if not content:
-                continue
-            parts = getattr(content, "parts", None)
-            if not parts:
-                continue
-            inline_data = getattr(parts[0], "inline_data", None)
-            if not inline_data:
-                continue
-            audio_bytes = getattr(inline_data, "data", None)
-            if audio_bytes:
-                pcm += bytes(audio_bytes)
-                count += 1
-        return pcm, count
+        _, pcm = cached_pcm(text)
+        return pcm
 
     try:
-        all_pcm, chunk_count = await loop.run_in_executor(executor, _collect_pcm)
-        wav_data = b""
-
+        all_pcm = await loop.run_in_executor(executor, _collect_pcm)
         if all_pcm:
-            wav_data = _make_wav_bytes(all_pcm)
-            await websocket.send_bytes(wav_data)
-            await manager.send_bytes(device_id, wav_data)
-
-        lumo_logger.info(f"LUMO TTS stream: {device_id} | text_len={len(text)} | chunks={chunk_count} | total_wav_bytes={len(wav_data)}")
-
-        if chunk_count == 0:
+            payload = all_pcm if raw_pcm else _make_wav_bytes(all_pcm)
+            await websocket.send_bytes(payload)
+            await manager.send_bytes(device_id, payload)
+            lumo_logger.info(
+                f"LUMO TTS stream: {device_id} | text_len={len(text)} | bytes={len(payload)} | raw_pcm={raw_pcm}"
+            )
+        else:
             await websocket.send_text(json.dumps({"type": "error", "message": "No audio generated"}))
     except Exception as e:
         lumo_logger.error(f"TTS stream error: {e}")
@@ -273,8 +207,6 @@ async def _stream_tts(text: str, websocket: WebSocket, device_id: str):
         except Exception:
             pass
 
-
-# ─── WEB SOCKET ROUTE ──────────────────────────────────────────────────────
 
 @router.websocket("/stream")
 async def ws_tts_stream(websocket: WebSocket, device_id: str = Query(...)):
@@ -287,7 +219,7 @@ async def ws_tts_stream(websocket: WebSocket, device_id: str = Query(...)):
       { "action": "stt_tts", "audio_b64": "<base64 wav>" }
 
     Server phan hoi:
-      - Binary frames: raw PCM (24kHz mono 16-bit) ← phat ngay
+      - Binary frames: WAV hoặc raw PCM (24kHz mono 16-bit nếu format="pcm")
       - JSON: { "type": "done" } | { "type": "error", "message": "..." }
     """
     await websocket.accept()
@@ -295,8 +227,6 @@ async def ws_tts_stream(websocket: WebSocket, device_id: str = Query(...)):
 
     try:
         while True:
-            # Python websockets gửi JSON dạng TEXT frame; ESP32 có thể gửi BINARY.
-            # receive_bytes() chỉ nhận binary → text frame gây RuntimeError và đóng socket mã 1000.
             incoming = await websocket.receive()
             if incoming["type"] != "websocket.receive":
                 break
@@ -307,7 +237,6 @@ async def ws_tts_stream(websocket: WebSocket, device_id: str = Query(...)):
             else:
                 continue
 
-            # Thử parse JSON (UTF-8)
             try:
                 text = raw.decode("utf-8")
                 msg = json.loads(text)
@@ -316,26 +245,28 @@ async def ws_tts_stream(websocket: WebSocket, device_id: str = Query(...)):
                 action = ""
                 msg = {}
 
+            raw_pcm = msg.get("format") == "pcm"
+
             if action == "tts":
-                # Nhận text → stream TTS ngay
                 text_input = msg.get("text", "")
                 if not text_input:
                     await websocket.send_text(json.dumps({"type": "error", "message": "text is empty"}))
                     continue
 
-                lumo_logger.info(f"user: {text_input}")
-                answer = await _run_llm(text_input)
-                lumo_logger.info(f"Lumo: {answer}")
+                if msg.get("direct"):
+                    answer = text_input
+                else:
+                    lumo_logger.info(f"user: {text_input}")
+                    answer = await _run_llm(text_input)
+                    lumo_logger.info(f"Lumo: {answer}")
 
-                await _stream_tts(answer, websocket, device_id)
+                await _stream_tts(answer, websocket, device_id, raw_pcm=raw_pcm)
                 await websocket.send_text(json.dumps({"type": "done"}))
 
             elif action == "stt_tts":
-                # Nhận base64 WAV → STT → LLM → TTS stream
                 import base64
                 audio_b64 = msg.get("audio_b64", "")
-                tmp_in = f"/tmp/ws_stt_{device_id}.wav"
-                tmp_out = f"/tmp/ws_tts_{device_id}.wav"
+                tmp_in = os.path.join(tempfile.gettempdir(), f"ws_stt_{device_id}_{os.getpid()}.wav")
 
                 try:
                     audio_bytes = base64.b64decode(audio_b64)
@@ -351,18 +282,15 @@ async def ws_tts_stream(websocket: WebSocket, device_id: str = Query(...)):
                     answer = await _run_llm(stt_text)
                     lumo_logger.info(f"Lumo: {answer}")
 
-                    # Stream TTS về ESP32
-                    await _stream_tts(answer, websocket, device_id)
+                    await _stream_tts(answer, websocket, device_id, raw_pcm=raw_pcm)
                     await websocket.send_text(json.dumps({"type": "done", "stt": stt_text}))
 
                 except Exception as e:
                     lumo_logger.error(f"stt_tts pipeline error: {e}")
                     await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
                 finally:
-                    import os
-                    for p in [tmp_in, tmp_out]:
-                        if os.path.exists(p):
-                            os.unlink(p)
+                    if os.path.exists(tmp_in):
+                        os.unlink(tmp_in)
 
             else:
                 await websocket.send_text(json.dumps({"type": "error", "message": f"Unknown action: {action}"}))

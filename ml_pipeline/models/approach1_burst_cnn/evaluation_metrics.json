@@ -1,0 +1,133 @@
+{
+  "test_accuracy": 0.9837777777777778,
+  "test_macro_f1": 0.983774262131155,
+  "test_weighted_f1": 0.983774262131155,
+  "overall_false_alert_rate": 0.0044444444444444444,
+  "wrist_shock_false_alert_rate": 0.0011111111111111111,
+  "device_drop_false_alert_rate": 0.0,
+  "binary_fall_sensitivity": 0.9933333333333333,
+  "critical_fall_recall": 0.9788888888888889,
+  "mean_confidence": 0.9680243134498596,
+  "confusion_matrix": [
+    [
+      877,
+      12,
+      0,
+      2,
+      9
+    ],
+    [
+      0,
+      899,
+      0,
+      0,
+      1
+    ],
+    [
+      0,
+      0,
+      900,
+      0,
+      0
+    ],
+    [
+      4,
+      0,
+      0,
+      870,
+      26
+    ],
+    [
+      8,
+      0,
+      0,
+      11,
+      881
+    ]
+  ],
+  "per_class_report": {
+    "NORMAL_ADL": {
+      "precision": 0.9865016872890888,
+      "recall": 0.9744444444444444,
+      "f1-score": 0.980435997764114,
+      "support": 900.0
+    },
+    "WRIST_SHOCK_FALSE_ALERT": {
+      "precision": 0.986827661909989,
+      "recall": 0.9988888888888889,
+      "f1-score": 0.992821645499724,
+      "support": 900.0
+    },
+    "DEVICE_DROP_OFF_WRIST": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 900.0
+    },
+    "SOFT_FALL_RECOVERING": {
+      "precision": 0.9852774631936579,
+      "recall": 0.9666666666666667,
+      "f1-score": 0.975883342680875,
+      "support": 900.0
+    },
+    "CRITICAL_FALL_IMMOBILE": {
+      "precision": 0.960741548527808,
+      "recall": 0.9788888888888889,
+      "f1-score": 0.9697303247110622,
+      "support": 900.0
+    },
+    "accuracy": 0.9837777777777778,
+    "macro avg": {
+      "precision": 0.9838696721841087,
+      "recall": 0.9837777777777779,
+      "f1-score": 0.983774262131155,
+      "support": 4500.0
+    },
+    "weighted avg": {
+      "precision": 0.9838696721841087,
+      "recall": 0.9837777777777778,
+      "f1-score": 0.983774262131155,
+      "support": 4500.0
+    }
+  },
+  "train_time_sec": 320.5,
+  "best_val_macro_f1": 0.992897695293902,
+  "parity_max_diff": 3.635883331298828e-06,
+  "stress_tests": [
+    {
+      "scenario": "Clean 10Hz BLE (0% loss)",
+      "cnn_acc": 0.9837777777777778,
+      "cnn_f1": 0.983774262131155,
+      "mlp_acc": 0.9973333333333333,
+      "mlp_f1": 0.9973350151806111
+    },
+    {
+      "scenario": "BLE Packet Drop 10%",
+      "cnn_acc": 0.936,
+      "cnn_f1": 0.9361964287495566,
+      "mlp_acc": 0.9655555555555555,
+      "mlp_f1": 0.9658147705174945
+    },
+    {
+      "scenario": "BLE Packet Drop 25%",
+      "cnn_acc": 0.8517777777777777,
+      "cnn_f1": 0.8528406259736421,
+      "mlp_acc": 0.8948888888888888,
+      "mlp_f1": 0.8973466131692696
+    },
+    {
+      "scenario": "BLE Packet Drop 40%",
+      "cnn_acc": 0.7515555555555555,
+      "cnn_f1": 0.7540405784789882,
+      "mlp_acc": 0.8028888888888889,
+      "mlp_f1": 0.8098609204094244
+    },
+    {
+      "scenario": "High Sensor Noise (2x)",
+      "cnn_acc": 0.9844444444444445,
+      "cnn_f1": 0.9844423680373223,
+      "mlp_acc": 0.9973333333333333,
+      "mlp_f1": 0.9973354891960966
+    }
+  ]
+}

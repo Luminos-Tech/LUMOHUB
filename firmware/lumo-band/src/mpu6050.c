@@ -1,4 +1,5 @@
 #include "mpu6050.h"
+#include "lumo_imu_ai.h"
 
 #include <stdbool.h>
 #include <math.h>
@@ -64,6 +65,10 @@ static int64_t s_last_alarm_log_ms;
 static uint32_t s_counter_still_ms;
 static uint32_t s_next_still_log_ms = 1000;
 static uint8_t s_move_samples;
+static int64_t s_ai_eval_due_ms;
+static uint8_t s_ai_class;
+static uint8_t s_ai_confidence_pct;
+static bool s_ai_ready;
 
 static const char *fall_state_name(fall_state_t state)
 {
@@ -146,6 +151,9 @@ void mpu6050_get_snapshot(mpu6050_snapshot_t *snapshot)
     }
     snapshot->sample_sequence = s_sample_sequence;
     snapshot->sampled_at_ms = s_sampled_at_ms;
+    snapshot->ai_class = s_ai_class;
+    snapshot->ai_confidence_pct = s_ai_confidence_pct;
+    snapshot->ai_ready = s_ai_ready;
     portEXIT_CRITICAL(&s_state_lock);
 }
 
@@ -377,6 +385,49 @@ static void mpu6050_task(void *param)
 
             update_fall_state(accel_magnitude, gyro_magnitude,
                               (int64_t)timestamp_ms);
+            lumo_ai_push_sample(accel_x, accel_y, accel_z,
+                                gyro_x, gyro_y, gyro_z,
+                                (uint64_t)timestamp_ms);
+            if (s_ai_eval_due_ms == 0 &&
+                (accel_magnitude >= 2.5f || accel_magnitude < 0.55f)) {
+                s_ai_eval_due_ms = (int64_t)timestamp_ms + 1800LL;
+                ESP_LOGW(TAG, "[LUMO_AI] Trigger (|a|=%.2fg) -> buffering 1.8s post-impact...",
+                         (double)accel_magnitude);
+            }
+            if (s_ai_eval_due_ms > 0 && (int64_t)timestamp_ms >= s_ai_eval_due_ms) {
+                s_ai_eval_due_ms = 0;
+                if (lumo_ai_buffer_ready()) {
+                    lumo_ai_dual_result_t ai_res;
+                    if (lumo_ai_evaluate_ring(&ai_res)) {
+                        portENTER_CRITICAL(&s_state_lock);
+                        s_ai_class = (uint8_t)ai_res.final_class;
+                        s_ai_confidence_pct = ai_res.final_confidence_pct;
+                        s_ai_ready = true;
+                        portEXIT_CRITICAL(&s_state_lock);
+
+                        ESP_LOGW(TAG,
+                                 "[LUMO_AI] RF=%s(%u%%,%luus) | MLP=%s(%u%%,%luus) | CNN=%s(%u%%,%luus) | FUSED=%s(%u%%)",
+                                 lumo_ai_class_name(ai_res.rf.pred_class), ai_res.rf.confidence_pct, (unsigned long)ai_res.rf.latency_us,
+                                 lumo_ai_class_name(ai_res.mlp.pred_class), ai_res.mlp.confidence_pct, (unsigned long)ai_res.mlp.latency_us,
+                                 lumo_ai_class_name(ai_res.cnn.pred_class), ai_res.cnn.confidence_pct, (unsigned long)ai_res.cnn.latency_us,
+                                 lumo_ai_class_name(ai_res.final_class), ai_res.final_confidence_pct);
+                        ESP_LOGW(TAG, "[LUMO_AI] %s", ai_res.commentary);
+
+                        if (ai_res.should_suppress_alarm) {
+                            if (g_fall_state == STATE_IMPACT_WAIT ||
+                                g_fall_state == STATE_FALL_CONFIRMED) {
+                                g_fall_state = STATE_IDLE;
+                                reset_fall_tracking();
+                                ESP_LOGW(TAG, "[LUMO_AI] False alert suppressed -> IDLE");
+                            }
+                        } else if (ai_res.final_class == LUMO_AI_CLASS_CRITICAL_FALL) {
+                            ESP_LOGE(TAG, "[LUMO_AI] CRITICAL FALL confirmed!");
+                        } else if (ai_res.final_class == LUMO_AI_CLASS_SOFT_FALL_RECOVER) {
+                            ESP_LOGW(TAG, "[LUMO_AI] SOFT FALL RECOVERING -> Hub voice check-in!");
+                        }
+                    }
+                }
+            }
             const int16_t accel_raw[3] = {accel_x_raw, accel_y_raw, accel_z_raw};
             const int16_t gyro_raw[3] = {gyro_x_raw, gyro_y_raw, gyro_z_raw};
             publish_snapshot(accel_magnitude, peak1s_g, moving, true, accel_raw, gyro_raw);
@@ -468,8 +519,11 @@ esp_err_t mpu6050_start(void)
     ESP_LOGI(TAG, "MPU6050 ready: WHO_AM_I=0x%02X, SDA=%d, SCL=%d",
              who_am_i, MPU6050_SDA_GPIO, MPU6050_SCL_GPIO);
 
+    lumo_ai_init();
+    lumo_ai_run_self_test();
+
     /* TODO: Use calibrated acceleration to estimate steps for BLE samples. */
-    if (xTaskCreate(mpu6050_task, "mpu6050", 3072, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(mpu6050_task, "mpu6050", 8192, NULL, 5, NULL) != pdPASS) {
         mark_sensor_offline();
         ESP_LOGE(TAG, "Cannot create MPU6050 task");
         release_i2c();

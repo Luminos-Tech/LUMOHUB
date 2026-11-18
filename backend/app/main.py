@@ -1,9 +1,17 @@
-from fastapi import FastAPI, Request, UploadFile, File
+from fastapi import Depends, FastAPI, Query, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.session import get_db
 from app.routes import api_router
+from app.routes.devices import (
+    device_ack_tts_job,
+    device_next_tts_job,
+    device_stream_tts_audio,
+)
+from app.schemas.device import DeviceTTSAckRequest, DeviceTTSAckResponse, DeviceTTSJob
 from app.websocket.routes import router as ws_router
 from app.websocket import api_router as ws_api_router
 from app.tasks.scheduler import start_scheduler, stop_scheduler
@@ -50,9 +58,43 @@ app.add_api_route(
     public_audio_endpoint,
     methods=["POST"],
     summary="LUMO voice pipeline (ESP32 public, no auth)",
-    description="Upload WAV → Groq STT → Gemini TTT → Gemini TTS → raw WAV binary. "
+    description="Upload WAV → Groq STT → Gemini TTT → Fast TTS/Cache → raw PCM/WAV binary. "
                  "No auth required. ESP32 calls this directly.",
 )
+
+
+# ── Tương thích đường dẫn DSOFT-AudioTTS cho ESP32 (/v1/devices/...) ──
+@app.get(
+    "/v1/devices/{device_code}/next",
+    tags=["ESP32 TTS"],
+    response_model=DeviceTTSJob,
+    responses={204: {"description": "No queued TTS job"}},
+)
+def compat_device_next_tts_job(device_code: str, db: Session = Depends(get_db)):
+    return device_next_tts_job(device_code=device_code, db=db)
+
+
+@app.get("/v1/devices/{device_code}/audio/{job_id}", tags=["ESP32 TTS"])
+def compat_device_stream_tts_audio(
+    device_code: str,
+    job_id: str,
+    lease: str = Query(..., min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+):
+    return device_stream_tts_audio(device_code=device_code, job_id=job_id, lease=lease, db=db)
+
+
+@app.post(
+    "/v1/devices/{device_code}/ack",
+    tags=["ESP32 TTS"],
+    response_model=DeviceTTSAckResponse,
+)
+def compat_device_ack_tts_job(
+    device_code: str,
+    body: DeviceTTSAckRequest,
+    db: Session = Depends(get_db),
+):
+    return device_ack_tts_job(device_code=device_code, body=body, db=db)
 
 
 @app.get("/health", tags=["Health"])

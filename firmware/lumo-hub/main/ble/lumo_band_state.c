@@ -16,6 +16,8 @@
 
 #include "lumo_band_state.h"
 
+#include <stdio.h>
+#include <string.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -147,6 +149,47 @@ void band_state_update(uint8_t  state,
     g_band_state.prev_steps = g_band_state.steps;
 }
 
+void band_state_update_ai(const lumo_ai_dual_result_t *res)
+{
+    if (res == NULL) {
+        return;
+    }
+    const uint64_t now_ms = esp_timer_get_time() / 1000ULL;
+
+    g_band_state.ai_class          = (uint8_t)res->final_class;
+    g_band_state.ai_cnn_class      = (uint8_t)res->cnn.pred_class;
+    g_band_state.ai_mlp_class      = (uint8_t)res->mlp.pred_class;
+    g_band_state.ai_confidence_pct = res->final_confidence_pct;
+    g_band_state.ai_suppressed     = res->should_suppress_alarm;
+    g_band_state.ai_evaluated_ms   = now_ms;
+    snprintf((char *)g_band_state.ai_commentary, sizeof(g_band_state.ai_commentary),
+             "%s", res->commentary);
+    g_band_state.ai_pending        = false;
+    g_band_state.ai_ready          = true;
+
+    if (res->should_suppress_alarm) {
+        /* AI verified wrist-only shock / device drop / normal ADL -> suppress alarm */
+        g_band_state.real_fall          = false;
+        g_band_state.soft_fall          = true;
+        g_band_state.in_danger_zone     = false;
+        g_band_state.impact_ms          = 0;
+        g_band_state.stillness_start_ms = 0;
+        ESP_LOGW(TAG, "%s", res->commentary);
+    } else if (res->final_class == LUMO_AI_CLASS_CRITICAL_FALL) {
+        g_band_state.real_fall          = true;
+        g_band_state.soft_fall          = false;
+        g_band_state.in_danger_zone     = true;
+        g_band_state.fall_alert_active  = true;
+        g_band_state.fall_confirmed_ms  = now_ms;
+        g_band_state.last_beep_ms       = 0;
+        ESP_LOGE(TAG, "%s", res->commentary);
+    } else if (res->final_class == LUMO_AI_CLASS_SOFT_FALL_RECOVER) {
+        g_band_state.real_fall          = false;
+        g_band_state.soft_fall          = true;
+        ESP_LOGW(TAG, "%s", res->commentary);
+    }
+}
+
 /* ========================================================================
  * band_evaluate_alerts — called from main task (non-BLE context)
  *
@@ -180,8 +223,20 @@ band_alert_type_t band_evaluate_alerts(void)
         return BAND_ALERT_NONE;
     }
 
+    const bool ai_pending_active =
+        g_band_state.ai_pending &&
+        (now_ms - g_band_state.ai_pending_ms) < 2500ULL;
+    const bool ai_suppressed_recent =
+        g_band_state.ai_ready && g_band_state.ai_suppressed &&
+        (now_ms - g_band_state.ai_evaluated_ms) < 10000ULL;
+    const bool ai_fall_recent =
+        g_band_state.ai_ready && !g_band_state.ai_suppressed &&
+        (now_ms - g_band_state.ai_evaluated_ms) < 15000ULL;
+
     /* --- 1. FALL_CONFIRMED (highest priority) --- */
-    if (g_band_state.state == BAND_STATE_FALL_CONFIRMED) {
+    if (!ai_suppressed_recent && !ai_pending_active &&
+        (g_band_state.state == BAND_STATE_FALL_CONFIRMED ||
+         (ai_fall_recent && g_band_state.ai_class == LUMO_AI_CLASS_CRITICAL_FALL))) {
         if (!g_band_state.fall_alert_active) {
             g_band_state.fall_alert_active   = true;
             g_band_state.fall_confirmed_ms   = now_ms;
@@ -194,8 +249,10 @@ band_alert_type_t band_evaluate_alerts(void)
         }
     }
 
-    /* --- 2. FALL_SUSPECT (IMPACT_WAIT) --- */
-    if (g_band_state.state == BAND_STATE_IMPACT_WAIT) {
+    /* --- 2. FALL_SUSPECT (IMPACT_WAIT or SOFT_FALL_RECOVERING) --- */
+    if (!ai_suppressed_recent && !ai_pending_active &&
+        (g_band_state.state == BAND_STATE_IMPACT_WAIT ||
+         (ai_fall_recent && g_band_state.ai_class == LUMO_AI_CLASS_SOFT_FALL_RECOVER))) {
         if (band_alert_can_fire(BAND_ALERT_FALL_SUSPECT)) {
             g_band_state.last_alert     = BAND_ALERT_FALL_SUSPECT;
             g_band_state.last_alert_sev = BAND_SEVERITY_WARN;
@@ -339,7 +396,7 @@ band_alert_type_t band_evaluate_alerts(void)
      * lần nữa → phát thêm 1 tiếng beep. Lặp đến khi peak rời xuống
      * < 8g (và < 1.4g hysteresis để reset in_danger_zone).
      * Không check gì trong lúc phát — chỉ gọi audio_play rồi delay 5s. */
-    if (g_band_state.peak_x100 >= THRESHOLD_PEAK_FALL) {
+    if (!ai_suppressed_recent && !ai_pending_active && g_band_state.peak_x100 >= THRESHOLD_PEAK_FALL) {
         g_band_state.in_danger_zone = true;
         g_band_state.last_beep_ms   = 0;
         if (band_alert_can_fire(BAND_ALERT_HIGH_ACTIVITY)) {

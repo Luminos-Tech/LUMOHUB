@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
     const backendTarget = `${backendBase}/api/v1/lumo/tts-preview?voice_name=${encodeURIComponent(voiceId)}&lang=${encodeURIComponent(lang)}&text=${encodeURIComponent(sampleText)}`;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
 
     const backendRes = await fetch(backendTarget, {
       signal: controller.signal,

@@ -27,8 +27,11 @@
 #define BLE_SAMPLE_PERIOD_MS 1000
 #define BLE_FALL_NOTIFY_PERIOD_MS 5000
 #define MPU_DIAGNOSTIC_PERIOD_MS 2000
+#define MPU_DIAGNOSTIC_BURST_PERIOD_MS 100
+#define MPU_DIAGNOSTIC_BURST_DURATION_MS 5000
+#define MPU_DIAGNOSTIC_BURST_PEAK_G 2.5f
 #define MPU_DIAGNOSTIC_VERSION 0x03U
-#define BAND_FW_VERSION "v0.3.0-mpu-diagnostics"
+#define BAND_FW_VERSION "v0.4.0-mpu-burst-ai"
 
 static const char *TAG = "lumo_c3_band";
 
@@ -287,6 +290,7 @@ static void sample_task(void *param)
     int64_t last_fall_notify_ms = -BLE_FALL_NOTIFY_PERIOD_MS;
     bool was_fall_confirmed = false;
     int64_t next_diagnostic_ms = 0;
+    int64_t burst_until_ms = 0;
 
     (void)param;
 
@@ -301,6 +305,18 @@ static void sample_task(void *param)
 
         mpu6050_get_snapshot(&snapshot);
         const uint8_t state = payload_state(&snapshot);
+        if (snapshot.sensor_online &&
+            (state == 2 || snapshot.peak1s_g >= MPU_DIAGNOSTIC_BURST_PEAK_G || snapshot.magnitude_g < 0.65f)) {
+            if (burst_until_ms <= now_ms) {
+                ESP_LOGW(TAG, "Impact burst mode ON (10 Hz 0x03 stream for %d ms)",
+                         MPU_DIAGNOSTIC_BURST_DURATION_MS);
+            }
+            burst_until_ms = now_ms + MPU_DIAGNOSTIC_BURST_DURATION_MS;
+        }
+        const bool burst_active = (now_ms < burst_until_ms) || (state == 2);
+        if (burst_active && next_diagnostic_ms > now_ms + MPU_DIAGNOSTIC_BURST_PERIOD_MS) {
+            next_diagnostic_ms = now_ms;
+        }
         fall_confirmed = state == 3;
         should_send = !fall_confirmed && now_ms >= next_regular_ms;
         if (fall_confirmed &&
@@ -321,8 +337,8 @@ static void sample_task(void *param)
             payload.heart_rate = hr;
             payload.steps = steps;
             payload.battery = battery;
-            payload.reserved0 = 0;
-            payload.reserved1 = 0;
+            payload.reserved0 = snapshot.ai_ready ? snapshot.ai_class : 0xFFU;
+            payload.reserved1 = snapshot.ai_ready ? snapshot.ai_confidence_pct : 0U;
 
             portENTER_CRITICAL(&state_lock);
             memcpy(sample_value, &payload, sizeof(payload));
@@ -389,7 +405,7 @@ static void sample_task(void *param)
                     ESP_LOGW(TAG, "MPU diagnostic notify failed: %d", rc);
                 }
             }
-            next_diagnostic_ms = now_ms + MPU_DIAGNOSTIC_PERIOD_MS;
+            next_diagnostic_ms = now_ms + (burst_active ? MPU_DIAGNOSTIC_BURST_PERIOD_MS : MPU_DIAGNOSTIC_PERIOD_MS);
         }
 
         was_fall_confirmed = fall_confirmed;
@@ -402,6 +418,9 @@ void app_main(void)
 {
     esp_err_t err = nvs_flash_init();
     int rc;
+
+    /* Allow native USB-Serial/JTAG to re-enumerate so boot/AI self-test logs are visible. */
+    vTaskDelay(pdMS_TO_TICKS(1500));
     ESP_LOGI(TAG, "LUMO BAND FW: %s (MPU diagnostics every 2s)", BAND_FW_VERSION);
 
     log_ble_mac();

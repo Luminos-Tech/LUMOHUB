@@ -1,4 +1,6 @@
 import asyncio
+from pathlib import Path
+import tempfile
 from threading import Event
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from app.db.session import get_db
 from app.routes import devices
 from app.services.deps import get_current_active_user
+from app.services.tts_service import TTSJobQueue
 from app.websocket import routes
 from app.websocket.manager import LumoConnectionManager
 
@@ -27,8 +30,12 @@ class DeviceControlTests(unittest.TestCase):
             updated_at=datetime(2026, 10, 29, tzinfo=timezone.utc),
         )
         self.db = MagicMock()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tts_queue = TTSJobQueue(cache_dir=Path(self.tmpdir.name))
+        self.tts_queue.update_tts_settings({"provider": "tone"})
         self.patches = [
             patch.object(devices, "manager", self.manager),
+            patch.object(devices, "tts_queue", self.tts_queue),
             patch.object(routes, "manager", self.manager),
             patch.object(devices, "get_device_by_id", return_value=self.device),
             patch.object(devices, "get_device_by_code", return_value=self.device),
@@ -52,6 +59,7 @@ class DeviceControlTests(unittest.TestCase):
         self.client.__exit__(None, None, None)
         for item in reversed(self.patches):
             item.stop()
+        self.tmpdir.cleanup()
 
     def hello(self, websocket):
         websocket.send_json({
@@ -156,10 +164,86 @@ class DeviceControlTests(unittest.TestCase):
             {"action": "reboot"},
             {"action": "play_sound", "sound": "../../other.wav"},
             {"action": "play_sound"},
+            {"action": "play_sound", "sound": "beep", "text": "hello"},
             {"action": "stop_audio", "sound": "beep"},
+            {"action": "stop_audio", "text": "hello"},
+            {"action": "speak"},
+            {"action": "speak", "text": "   "},
+            {"action": "speak", "text": "hello", "sound": "beep"},
         ):
             with self.subTest(payload=payload):
                 self.assertEqual(self.client.post("/api/v1/devices/1/commands", json=payload).status_code, 422)
+
+    def test_speak_requires_tts_stream_capability(self):
+        with self.client.websocket_connect("/ws/lumo?device_id=0001") as websocket:
+            self.hello(websocket)
+            response = self.client.post(
+                "/api/v1/devices/1/commands",
+                json={"action": "speak", "text": "Xin chào", "volume": 75},
+            )
+            self.assertEqual(response.status_code, 409)
+
+    def test_speak_streams_cached_pcm_and_acknowledges_job(self):
+        with self.client.websocket_connect("/ws/lumo?device_id=0001") as websocket:
+            websocket.send_json({
+                "type": "hello", "device_id": "0001", "firmware_version": "v0.6.0-dsoft-stream-tts",
+                "capabilities": ["audio_control_v1", "tts_stream_v1"],
+            })
+            self.assertEqual(websocket.receive_json()["type"], "ready")
+            status = self.client.get("/api/v1/devices/1/control").json()
+            self.assertTrue(status["tts_stream"])
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(
+                    self.client.post, "/api/v1/devices/1/commands",
+                    json={"action": "speak", "text": "Đến giờ uống thuốc", "volume": 75},
+                )
+                message = websocket.receive_json()
+                self.assertEqual(message["action"], "speak")
+                self.assertEqual(message["volume"], 75)
+                self.assertEqual(message["sample_rate"], 24000)
+                self.assertEqual(message["audio_bytes"], 48000)
+                pcm_res = self.client.get(message["audio_path"])
+                self.assertEqual(pcm_res.status_code, 200)
+                self.assertEqual(len(pcm_res.content), 48000)
+                websocket.send_json({
+                    "type": "command_result", "request_id": message["request_id"],
+                    "status": "completed",
+                })
+                response = pending.result(timeout=5)
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body["status"], "completed")
+            self.assertEqual(body["job_id"], message["job_id"])
+            self.assertEqual(body["audio_bytes"], 48000)
+            self.assertEqual(self.tts_queue.get_job(message["job_id"])["status"], "played")
+
+    def test_device_polling_next_audio_and_idempotent_ack(self):
+        queued = self.tts_queue.enqueue("0001", "Nhắc lịch họp", volume=65, priority=5)
+        self.assertEqual(queued["status"], "queued")
+
+        job_res = self.client.get("/api/v1/devices/code/0001/next")
+        self.assertEqual(job_res.status_code, 200)
+        job = job_res.json()
+        self.assertEqual(job["id"], queued["id"])
+        self.assertEqual(job["volume"], 65)
+        self.assertEqual(job["sample_rate"], 24000)
+        self.assertEqual(job["audio_bytes"], 48000)
+
+        # Không phát chồng khi đang có job ở trạng thái playing
+        self.assertEqual(self.client.get("/api/v1/devices/code/0001/next").status_code, 204)
+
+        audio_res = self.client.get(f"/api/v1/devices/code/0001/audio/{job['id']}?lease={job['lease']}")
+        self.assertEqual(audio_res.status_code, 200)
+        self.assertEqual(len(audio_res.content), 48000)
+
+        ack_payload = {"id": job["id"], "lease": job["lease"], "status": "played"}
+        self.assertEqual(self.client.post("/api/v1/devices/code/0001/ack", json=ack_payload).status_code, 200)
+        self.assertEqual(self.client.post("/api/v1/devices/code/0001/ack", json=ack_payload).status_code, 200)
+        self.assertEqual(
+            self.client.post("/api/v1/devices/code/0001/ack", json={**ack_payload, "status": "failed"}).status_code,
+            409,
+        )
+        self.assertEqual(self.client.get("/api/v1/devices/code/0001/next").status_code, 204)
 
     def test_browser_ping_does_not_mark_hardware_online(self):
         with self.client.websocket_connect("/ws/lumo?device_id=0001") as websocket:

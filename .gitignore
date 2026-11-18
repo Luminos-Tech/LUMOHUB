@@ -112,3 +112,7 @@ record_from_board.wav
 *_output.wav
 *.pcm
 lumo_device_*.png
+
+# ML large dataset & pickle artifacts (hosted on Hugging Face)
+ml_pipeline/data/*.npz
+ml_pipeline/models/**/*.pkl

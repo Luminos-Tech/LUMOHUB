@@ -1,0 +1,22 @@
+{
+  "architecture": "LumoBurst1DCNN",
+  "input_shape": [
+    30,
+    6
+  ],
+  "normalization": {
+    "accel_div": 8.0,
+    "gyro_div": 250.0
+  },
+  "num_classes": 5,
+  "class_names": [
+    "NORMAL_ADL",
+    "WRIST_SHOCK_FALSE_ALERT",
+    "DEVICE_DROP_OFF_WRIST",
+    "SOFT_FALL_RECOVERING",
+    "CRITICAL_FALL_IMMOBILE"
+  ],
+  "folded_parameters": 5325,
+  "flash_bytes": 21300,
+  "macs_per_inference": 58368
+}

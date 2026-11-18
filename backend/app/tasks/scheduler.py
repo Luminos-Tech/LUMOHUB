@@ -1,11 +1,14 @@
+import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.models.reminder import Reminder
 from app.models.event import Event
+from app.crud.device import get_devices_by_user
 from app.crud.reminder import mark_reminder_sent
 from app.crud.notification import create_notification
+from app.services.tts_service import SAMPLE_RATE_HZ, tts_queue
 from app.websocket.manager import manager
 from app.websocket.notification_manager import notification_manager
 from app.utils.timezone import VIETNAM_TIMEZONE, as_local, as_utc
@@ -15,6 +18,50 @@ import json
 
 
 scheduler = AsyncIOScheduler(timezone=VIETNAM_TIMEZONE)
+
+
+async def _dispatch_lumo_tts(device_code: str, job: dict) -> None:
+    """Gửi lệnh phát TTS qua WebSocket cho Hub đang online và chốt ACK."""
+    extra = {
+        "job_id": job["id"],
+        "lease": job["lease"],
+        "volume": job["volume"],
+        "audio_bytes": job["audio_bytes"],
+        "sample_rate": SAMPLE_RATE_HZ,
+        "audio_path": f"/api/v1/devices/code/{device_code}/audio/{job['id']}?lease={job['lease']}",
+    }
+    try:
+        result = await manager.execute_command(device_code, "speak", extra=extra, timeout=65.0)
+        ack_status = "played" if result.get("status") == "completed" else "failed"
+    except Exception:
+        ack_status = "failed"
+    try:
+        tts_queue.ack(device_code, job["id"], job["lease"], ack_status)
+    except Exception:
+        pass
+
+
+async def _enqueue_lumo_reminder_tts(db: Session, user_id: int, event_title: str) -> None:
+    devices = get_devices_by_user(db, user_id)
+    speech_text = f"Nhắc lịch: {event_title}"
+    for dev in devices:
+        device_code = getattr(dev, "device_id", None)
+        if not isinstance(device_code, str) or not getattr(dev, "is_active", False):
+            continue
+        status = manager.control_status(device_code)
+        online_tts = bool(status.get("connected") and status.get("tts_stream"))
+        try:
+            job = await asyncio.to_thread(
+                tts_queue.enqueue,
+                device_code,
+                speech_text,
+                priority=5,
+                claim_immediately=online_tts,
+            )
+            if online_tts:
+                asyncio.create_task(_dispatch_lumo_tts(device_code, job))
+        except Exception as tts_err:
+            print(f"⚠️ Lumo reminder TTS failed for {device_code}: {tts_err}")
 
 
 async def check_reminders():
@@ -65,6 +112,7 @@ async def check_reminders():
                     "message": content,
                     "start_time": as_local(event.start_time).isoformat(),
                 })
+                await _enqueue_lumo_reminder_tts(db, user_id, event.title)
 
             mark_reminder_sent(db, reminder)
             print(f"📬 Reminder sent for event [{event.id}] {event.title} → user {user_id}")

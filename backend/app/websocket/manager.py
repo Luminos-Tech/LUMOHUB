@@ -43,9 +43,11 @@ class LumoConnectionManager:
 
     def control_status(self, device_id: str) -> dict:
         info = self.device_info.get(device_id, {})
+        capabilities = info.get("capabilities", [])
         return {
             "connected": device_id in self.active_connections,
-            "audio_control": "audio_control_v1" in info.get("capabilities", []),
+            "audio_control": "audio_control_v1" in capabilities,
+            "tts_stream": "tts_stream_v1" in capabilities,
             "firmware_version": info.get("firmware_version"),
             "logs_enabled": settings.DEVICE_LOGS_ENABLED,
         }
@@ -69,27 +71,39 @@ class LumoConnectionManager:
         if self.active_connections.get(device_id) is websocket:
             self.logs.append_batch(device_id, entries)
 
-    async def execute_command(self, device_id: str, action: str, sound: str | None = None) -> dict:
+    async def execute_command(
+        self,
+        device_id: str,
+        action: str,
+        sound: str | None = None,
+        extra: dict | None = None,
+        timeout: float = 20.0,
+    ) -> dict:
         websocket = self.active_connections.get(device_id)
         if websocket is None:
             raise ConnectionError("Device is offline")
         command_id = uuid4().hex
         future = asyncio.get_running_loop().create_future()
         self.pending_commands[command_id] = (device_id, websocket, future)
-        message = {"type": "command", "request_id": command_id, "action": action}
+        message: dict = {"type": "command", "request_id": command_id, "action": action}
         if sound is not None:
             message["sound"] = sound
+        if extra:
+            for key, value in extra.items():
+                if key not in {"type", "request_id", "action"}:
+                    message[key] = value
         try:
-            self.logs.append(device_id, "I", "SERVER", f"Command sent: {action}" + (f" ({sound})" if sound else ""))
+            detail = f" ({sound})" if sound else ""
+            self.logs.append(device_id, "I", "SERVER", f"Command sent: {action}{detail}")
             try:
                 await websocket.send_json(message)
             except Exception as exc:
                 future.cancel()
                 self.disconnect(device_id, websocket)
                 raise ConnectionError("Device disconnected") from exc
-            return await asyncio.wait_for(future, timeout=20)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
-            self.logs.append(device_id, "W", "SERVER", "Device did not confirm the command within 20 seconds")
+            self.logs.append(device_id, "W", "SERVER", f"Device did not confirm the command within {int(timeout)} seconds")
             raise
         finally:
             self.pending_commands.pop(command_id, None)

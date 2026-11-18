@@ -25,21 +25,38 @@ class DeviceUpdateRequest(BaseModel):
 
 
 class DeviceCommandRequest(BaseModel):
-    action: Literal["play_sound", "stop_audio"]
+    action: Literal["play_sound", "stop_audio", "speak"]
     sound: Literal["beep", "greeting", "checkin"] | None = None
+    text: str | None = Field(default=None, min_length=1, max_length=1000)
+    volume: int = Field(default=80, ge=0, le=100)
+    priority: int = Field(default=0, ge=0, le=10)
+    voice: str | None = Field(default=None, max_length=160)
 
     @model_validator(mode="after")
     def check_sound(self):
-        if self.action == "play_sound" and self.sound is None:
-            raise ValueError("sound is required for play_sound")
-        if self.action == "stop_audio" and self.sound is not None:
-            raise ValueError("stop_audio does not accept a sound")
+        if self.action == "play_sound":
+            if self.sound is None:
+                raise ValueError("sound is required for play_sound")
+            if self.text is not None:
+                raise ValueError("play_sound does not accept text")
+        elif self.action == "stop_audio":
+            if self.sound is not None:
+                raise ValueError("stop_audio does not accept a sound")
+            if self.text is not None:
+                raise ValueError("stop_audio does not accept text")
+        elif self.action == "speak":
+            if self.sound is not None:
+                raise ValueError("speak does not accept a sound")
+            if self.text is None or not self.text.strip():
+                raise ValueError("text is required for speak")
+            self.text = self.text.strip()
         return self
 
 
 class DeviceControlStatus(BaseModel):
     connected: bool
     audio_control: bool
+    tts_stream: bool = False
     firmware_version: str | None = None
     logs_enabled: bool = False
 
@@ -47,6 +64,28 @@ class DeviceControlStatus(BaseModel):
 class DeviceCommandResponse(BaseModel):
     request_id: str
     status: Literal["completed", "stopped"]
+    job_id: str | None = None
+    audio_bytes: int | None = None
+
+
+class DeviceTTSJob(BaseModel):
+    id: str
+    lease: str
+    volume: int
+    sample_rate: int
+    audio_bytes: int
+    lease_seconds: int
+
+
+class DeviceTTSAckRequest(BaseModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    lease: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    status: Literal["played", "failed"]
+
+
+class DeviceTTSAckResponse(BaseModel):
+    id: str
+    status: Literal["played", "failed"]
 
 
 class DeviceLogEntry(BaseModel):

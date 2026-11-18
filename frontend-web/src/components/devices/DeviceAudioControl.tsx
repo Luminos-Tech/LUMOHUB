@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { isAxiosError } from "axios";
-import { Loader2, Square, Volume2, Wifi, WifiOff } from "lucide-react";
+import { Loader2, MessageSquareText, Square, Volume2, Wifi, WifiOff } from "lucide-react";
 import { devicesApi } from "@/features/devices/api";
 import type { Device, DeviceControlStatus, DeviceSound } from "@/types";
 
@@ -13,6 +13,7 @@ const errors: Record<string, [string, string]> = {
   "Device did not confirm the command": ["Chưa nhận được xác nhận từ Hub. Kiểm tra thiết bị trước khi thử lại.", "The Hub did not confirm. Check the device before retrying."],
   "Device could not execute the command": ["Hub không phát được âm thanh.", "The Hub could not play the sound."],
   "Firmware does not support audio control": ["Cần cập nhật firmware của Hub để điều khiển loa.", "Update the Hub firmware to control audio."],
+  "Firmware does not support TTS streaming": ["Cần cập nhật firmware v0.6.0 trở lên để phát giọng nói TTS trực tiếp.", "Update the Hub firmware (v0.6.0+) to stream TTS audio."],
 };
 
 export function DeviceAudioControl({ device, isEnglish = false, onStatusChange }: {
@@ -23,12 +24,17 @@ export function DeviceAudioControl({ device, isEnglish = false, onStatusChange }
   const [status, setStatus] = useState<DeviceControlStatus | null>(null);
   const [statusError, setStatusError] = useState(false);
   const [sound, setSound] = useState<DeviceSound>("beep");
+  const [ttsText, setTtsText] = useState("");
+  const [volume, setVolume] = useState(80);
   const [playing, setPlaying] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [failed, setFailed] = useState(false);
   const commandNumber = useRef(0);
   const online = status?.connected === true && status.audio_control && !statusError;
+  const canStreamTts = online && status?.tts_stream === true;
+  const busy = playing || speaking;
 
   useEffect(() => {
     let active = true;
@@ -48,7 +54,7 @@ export function DeviceAudioControl({ device, isEnglish = false, onStatusChange }
       } catch {
         if (active) {
           setStatusError(true);
-          onStatusChange?.(device.id, { connected: false, audio_control: false, firmware_version: null });
+          onStatusChange?.(device.id, { connected: false, audio_control: false, tts_stream: false, firmware_version: null });
         }
       } finally {
         if (active) timer = setTimeout(refresh, 5000);
@@ -58,19 +64,26 @@ export function DeviceAudioControl({ device, isEnglish = false, onStatusChange }
     return () => { active = false; clearTimeout(timer); commandCounter.current++; };
   }, [device.id, onStatusChange]);
 
-  const send = async (action: "play" | "stop") => {
+  const send = async (action: "play" | "stop" | "speak") => {
+    if (action === "speak" && !ttsText.trim()) return;
     const ticket = ++commandNumber.current;
-    if (action === "play") setPlaying(true); else setStopping(true);
+    if (action === "play") setPlaying(true);
+    else if (action === "speak") setSpeaking(true);
+    else setStopping(true);
     setFailed(false);
     setFeedback(isEnglish ? "Waiting for the Hub..." : "Đang chờ Hub xác nhận...");
     try {
       const response = action === "play"
         ? await devicesApi.playSound(device.id, sound)
-        : await devicesApi.stopAudio(device.id);
+        : action === "speak"
+          ? await devicesApi.speakText(device.id, ttsText.trim(), volume)
+          : await devicesApi.stopAudio(device.id);
       if (ticket !== commandNumber.current) return;
       setFeedback(response.data.status === "stopped"
         ? (isEnglish ? "The Hub received the stop request." : "Hub đã nhận yêu cầu dừng âm thanh.")
-        : (isEnglish ? "The Hub finished playing the sound." : "Hub đã phát xong âm thanh."));
+        : action === "speak"
+          ? (isEnglish ? "The Hub finished speaking the text." : "Hub đã đọc xong văn bản.")
+          : (isEnglish ? "The Hub finished playing the sound." : "Hub đã phát xong âm thanh."));
     } catch (error) {
       if (ticket !== commandNumber.current) return;
       const detail = isAxiosError(error) ? error.response?.data?.detail : undefined;
@@ -79,7 +92,9 @@ export function DeviceAudioControl({ device, isEnglish = false, onStatusChange }
         ? errors[detail][isEnglish ? 1 : 0]
         : (isEnglish ? "Could not control the Hub. Check the connection." : "Không gửi được lệnh đến Hub. Hãy kiểm tra kết nối."));
     } finally {
-      if (action === "play") setPlaying(false); else setStopping(false);
+      if (action === "play") setPlaying(false);
+      else if (action === "speak") setSpeaking(false);
+      else setStopping(false);
     }
   };
 
@@ -102,7 +117,7 @@ export function DeviceAudioControl({ device, isEnglish = false, onStatusChange }
         <label className="min-w-36 flex-1">
           <span className="sr-only">{isEnglish ? "Sound" : "Âm thanh"}</span>
           <select value={sound} onChange={(event) => setSound(event.target.value as DeviceSound)}
-            disabled={playing || !online}
+            disabled={busy || !online}
             className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-600/20 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
             <option value="beep">{isEnglish ? "Test beep" : "Tiếng bíp thử loa"}</option>
             <option value="greeting">{isEnglish ? "Greeting" : "Lời chào LUMO"}</option>
@@ -110,7 +125,7 @@ export function DeviceAudioControl({ device, isEnglish = false, onStatusChange }
           </select>
         </label>
         <button type="button" className="inline-flex items-center gap-2 rounded-xl bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
-          onClick={() => void send("play")} disabled={!online || playing || stopping}>
+          onClick={() => void send("play")} disabled={!online || busy || stopping}>
           {playing ? <Loader2 size={16} className="animate-spin" /> : <Volume2 size={16} />}
           {playing ? (isEnglish ? "Playing..." : "Đang phát...") : (isEnglish ? "Play on Hub" : "Phát trên Hub")}
         </button>
@@ -120,6 +135,64 @@ export function DeviceAudioControl({ device, isEnglish = false, onStatusChange }
           {isEnglish ? "Stop" : "Dừng"}
         </button>
       </div>
+
+      <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label htmlFor={`hub-tts-${device.id}`} className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-300">
+            <MessageSquareText size={15} />
+            {isEnglish ? "Direct text-to-speech (TTS)" : "Đọc văn bản trực tiếp (TTS)"}
+          </label>
+          <span className="text-xs text-slate-500">
+            {isEnglish ? `Volume: ${volume}%` : `Âm lượng: ${volume}%`}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            id={`hub-tts-${device.id}`}
+            type="text"
+            maxLength={1000}
+            value={ttsText}
+            onChange={(event) => setTtsText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && canStreamTts && ttsText.trim() && !busy && !stopping) {
+                event.preventDefault();
+                void send("speak");
+              }
+            }}
+            disabled={!online || busy}
+            placeholder={isEnglish ? "Enter text for LUMO Hub to speak..." : "Nhập câu tiếng Việt để LUMO Hub đọc ngay..."}
+            className="min-w-48 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800 outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-600/20 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+          />
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={volume}
+            aria-label={isEnglish ? "TTS volume" : "Âm lượng TTS"}
+            onChange={(event) => setVolume(Number(event.target.value))}
+            disabled={!online || busy}
+            className="w-24 accent-teal-700"
+          />
+          <button
+            type="button"
+            onClick={() => void send("speak")}
+            disabled={!canStreamTts || !ttsText.trim() || busy || stopping}
+            className="inline-flex items-center gap-2 rounded-xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {speaking ? <Loader2 size={16} className="animate-spin" /> : <MessageSquareText size={16} />}
+            {speaking ? (isEnglish ? "Speaking..." : "Đang đọc...") : (isEnglish ? "Speak on Hub" : "Đọc trên Hub")}
+          </button>
+        </div>
+        {online && !status?.tts_stream && (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            {isEnglish
+              ? "Hub firmware does not report tts_stream_v1 yet. Flash v0.6.0+ for fast RAM TTS streaming."
+              : "Firmware Hub hiện tại chưa hỗ trợ tts_stream_v1. Nạp bản v0.6.0+ để đọc TTS trực tiếp qua RAM."}
+          </p>
+        )}
+      </div>
+
       {feedback && <p role="status" aria-live="polite" className={`text-sm ${failed ? "text-red-600 dark:text-red-400" : "text-emerald-700 dark:text-emerald-400"}`}>{feedback}</p>}
     </section>
   );
